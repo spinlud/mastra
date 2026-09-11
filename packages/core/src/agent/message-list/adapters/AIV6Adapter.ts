@@ -80,6 +80,32 @@ function getToolNameFromUIPart(part: AIV6Type.ToolUIPart | AIV6Type.DynamicToolU
   return part.type === 'dynamic-tool' ? sanitizeToolName(part.toolName) : getToolNameFromType(part.type);
 }
 
+/**
+ * v6 splits tool provider metadata across `callProviderMetadata` and
+ * `resultProviderMetadata`, but a Mastra part has one slot. Reading only the call half
+ * dropped the `toModelOutput` projection prompt building looks for (issue #22012).
+ * The result half wins on conflict, being the later of the two.
+ */
+function mergeToolUIPartProviderMetadata(
+  part: AIV6Type.ToolUIPart | AIV6Type.DynamicToolUIPart,
+): MastraProviderMetadata | undefined {
+  const callMetadata = 'callProviderMetadata' in part ? part.callProviderMetadata : undefined;
+  const resultMetadata = 'resultProviderMetadata' in part ? part.resultProviderMetadata : undefined;
+
+  if (!resultMetadata) return toMastraProviderMetadata(callMetadata);
+  if (!callMetadata) return toMastraProviderMetadata(resultMetadata);
+
+  // Merge per provider namespace so a result that only sets `mastra.modelOutput` keeps
+  // the call-time keys sitting beside it.
+  const merged: AIV6Type.ProviderMetadata = { ...callMetadata };
+  for (const [providerKey, resultValue] of Object.entries(resultMetadata)) {
+    const callValue = merged[providerKey];
+    merged[providerKey] = callValue ? { ...callValue, ...resultValue } : resultValue;
+  }
+
+  return toMastraProviderMetadata(merged);
+}
+
 function createToolInvocationPartFromUIPart(part: AIV6Type.ToolUIPart | AIV6Type.DynamicToolUIPart) {
   const callProviderMetadata =
     'callProviderMetadata' in part ? toMastraProviderMetadata(part.callProviderMetadata) : undefined;
@@ -95,10 +121,15 @@ function createToolInvocationPartFromUIPart(part: AIV6Type.ToolUIPart | AIV6Type
     toolName: getToolNameFromUIPart(part),
     args: normalizeToolArgs(part.input),
     approval: 'approval' in part ? toMastraApproval(part.approval) : undefined,
+    // Start from the call+result merge that keeps the `mastra.modelOutput`
+    // projection (issue #22012), then preserve the distinct Responses item ids
+    // (tsc_… call / tso_… output) on top so the merge's result-wins step does
+    // not collapse both ids onto the result's, which fails replay with
+    // "Duplicate item found".
     providerMetadata: preserveResponseItemIdsOnMerge(
       callProviderMetadata as Record<string, unknown> | undefined,
       resultProviderMetadata as Record<string, unknown> | undefined,
-      callProviderMetadata as Record<string, unknown> | undefined,
+      mergeToolUIPartProviderMetadata(part) as Record<string, unknown> | undefined,
     ) as MastraProviderMetadata | undefined,
     providerExecuted: part.providerExecuted,
     title: part.title,
@@ -376,7 +407,8 @@ export class AIV6Adapter {
     const hasTextParts = dbParts.some(part => part.type === 'text');
 
     for (const part of dbParts) {
-      parts.push(AIV6Adapter.toUIPart(part));
+      const uiPart = AIV6Adapter.toUIPart(part);
+      if (uiPart) parts.push(uiPart);
     }
 
     if (!hasToolInvocationParts || !hasReasoningParts || !hasFileParts || !hasTextParts) {
@@ -578,7 +610,7 @@ export class AIV6Adapter {
     };
   }
 
-  private static toUIPart(part: MastraMessagePart): AIV6Type.UIMessage['parts'][number] {
+  private static toUIPart(part: MastraMessagePart): AIV6Type.UIMessage['parts'][number] | undefined {
     if (part.type === 'tool-invocation') {
       const base = withOptionalFields(
         {
@@ -716,17 +748,20 @@ export class AIV6Adapter {
       ) as AIV6Type.UIMessage['parts'][number];
     }
 
-    return AIV6Adapter.toUIPartFromV5(
-      AIV5Adapter.toUIMessage({
-        id: 'tmp',
-        role: 'assistant',
-        createdAt: new Date(),
-        content: {
-          format: 2,
-          parts: [part],
-        },
-      }).parts[0]!,
-    );
+    const v5Part = AIV5Adapter.toUIMessage({
+      id: 'tmp',
+      role: 'assistant',
+      createdAt: new Date(),
+      content: {
+        format: 2,
+        parts: [part],
+      },
+    }).parts[0];
+
+    // The v5 bridge legitimately omits some parts (e.g. reasoning with no text and no
+    // details, which streaming emits before the first reasoning delta arrives).
+    // Signal "no part" instead of dereferencing undefined.
+    return v5Part ? AIV6Adapter.toUIPartFromV5(v5Part) : undefined;
   }
 
   private static toUIPartFromV5(part: AIV5Type.UIMessage['parts'][number]): AIV6Type.UIMessage['parts'][number] {

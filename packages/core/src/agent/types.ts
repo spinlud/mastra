@@ -11,7 +11,7 @@ import type { MastraServerCache } from '../cache/base';
 import type { AgentChannels } from '../channels/agent-channels';
 import type { ChannelConfig } from '../channels/types';
 import type { WaitUntilFn } from '../channels/wait-until';
-import type { MastraScorer, MastraScorers, ScoringSamplingConfig } from '../evals';
+import type { MastraScorer, MastraScorers, ScoringFilter, ScoringSamplingConfig } from '../evals';
 import type { PubSub } from '../events/pubsub';
 import type {
   CoreMessage,
@@ -67,7 +67,7 @@ import type { SkillFormat } from '../workspace/skills';
 import type { Agent } from './agent';
 import type { AgentExecutionOptions, NetworkOptions } from './agent.types';
 import type { MessageList } from './message-list/index';
-import type { AgentSignalAttributes, CreatedAgentSignal } from './signals';
+import type { AgentSignalAttributes, AgentSignalType, CreatedAgentSignal } from './signals';
 import type { SubAgent } from './subagent';
 export type {
   MastraDBMessage,
@@ -355,9 +355,15 @@ export interface AgentThreadRun<OUTPUT = unknown> {
 /**
  * @experimental Agent signals are experimental and may change in a future release.
  */
-export interface AgentSubscribeToThreadOptions {
+export interface AgentThreadIdentityOptions {
   resourceId?: string;
   threadId: string;
+}
+
+/** @experimental Agent signals are experimental and may change in a future release. */
+export interface AgentSubscribeToThreadOptions extends AgentThreadIdentityOptions {
+  /** Subscriber-local signal filtering: true hides all recognized types, false hides none, or select types with an array. Defaults to none. */
+  hideSignals?: boolean | AgentSignalType[];
 }
 
 /**
@@ -534,6 +540,8 @@ export type AgentDurableOption =
       maxSteps?: number;
       /** Auto-cleanup timer for durable stream state (ms). */
       cleanupTimeoutMs?: number;
+      /** See createDurableAgent options: per-topic opt-out of the replay cache. */
+      shouldCache?: (topic: string) => boolean;
       /** Optional id override (defaults to agent.id). */
       id?: string;
       /** Optional name override (defaults to agent.name). */
@@ -1015,7 +1023,9 @@ export type AgentGenerateOptions<
    */
   versions?: VersionOverrides;
   /** Scorers to use for this generation */
-  scorers?: MastraScorers | Record<string, { scorer: MastraScorer['name']; sampling?: ScoringSamplingConfig }>;
+  scorers?:
+    | MastraScorers
+    | Record<string, { scorer: MastraScorer['name']; sampling?: ScoringSamplingConfig; filter?: ScoringFilter }>;
   /** Whether to return the input required to run scorers for agents, defaults to false */
   returnScorerData?: boolean;
   /**
@@ -1128,7 +1138,9 @@ export type AgentStreamOptions<
   /** tracing options for starting new traces */
   tracingOptions?: TracingOptions;
   /** Scorers to use for this generation */
-  scorers?: MastraScorers | Record<string, { scorer: MastraScorer['name']; sampling?: ScoringSamplingConfig }>;
+  scorers?:
+    | MastraScorers
+    | Record<string, { scorer: MastraScorer['name']; sampling?: ScoringSamplingConfig; filter?: ScoringFilter }>;
   /** Provider-specific options for supported AI SDK packages (Anthropic, Google, OpenAI, xAI) */
   providerOptions?: ProviderOptions;
 } & Partial<ObservabilityContext> &
@@ -1172,7 +1184,9 @@ export type AgentExecuteOnFinishOptions = {
   messageList: MessageList;
   threadExists: boolean;
   structuredOutput?: boolean;
-  overrideScorers?: MastraScorers | Record<string, { scorer: MastraScorer['name']; sampling?: ScoringSamplingConfig }>;
+  overrideScorers?:
+    | MastraScorers
+    | Record<string, { scorer: MastraScorer['name']; sampling?: ScoringSamplingConfig; filter?: ScoringFilter }>;
   onTitleGenerated?: (title: string) => void | Promise<void>;
   /**
    * Optional platform `waitUntil` so detached title generation survives

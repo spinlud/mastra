@@ -22,7 +22,6 @@ import {
 import { findProviderToolByName } from '../../../tools/provider-tool-utils';
 import { getNeedsApprovalFn } from '../../../tools/toolchecks';
 import type { MastraToolInvocationOptions, ToolApprovalContext } from '../../../tools/types';
-import { noopObserve } from '../../../tools/types';
 import { ensureSerializable } from '../../../utils';
 import type { SuspendOptions } from '../../../workflows/step';
 import { createStep } from '../../../workflows/workflow';
@@ -39,6 +38,7 @@ import {
   RESOURCE_ID_KEY,
   SAVE_QUEUE_MANAGER_KEY,
   STEP_ACTIVE_TOOLS_KEY,
+  STEP_MODEL_MESSAGES_KEY,
   STEP_TOOLS_KEY,
   STEP_WORKSPACE_KEY,
   THREAD_EXISTS_KEY,
@@ -81,6 +81,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
   _internal,
   logger,
   agentId,
+  agentVersionId,
   mastra,
   requireToolApproval: requireToolApprovalFromFactory,
   actor,
@@ -629,6 +630,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                 },
                 __streamState: streamState.serialize(),
                 __agentId: agentId,
+                ...(agentVersionId ? { __agentVersionId: agentVersionId } : {}),
               },
               {
                 resumeLabel: inputData.toolCallId,
@@ -680,12 +682,12 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
         const toolOptions: MastraToolInvocationOptions = {
           abortSignal: options?.abortSignal,
           toolCallId: inputData.toolCallId,
-          // Pass all messages (input + response + memory) so sub-agents (agent-* tools) receive
-          // the full conversation context and can make better decisions. Each sub-agent invocation
-          // uses a fresh unique thread, so storing this context in that thread is scoped and safe.
-          messages: isAgentTool ? messageList.get.all.aiV5.model() : messageList.get.input.aiV5.model(),
+          // Agent tools receive the exact processor-adjusted prompt visible to the parent model.
+          // Regular tools retain the input-only context expected by the AI SDK tool contract.
+          messages: isAgentTool
+            ? (readScoped(scopeCtx, STEP_MODEL_MESSAGES_KEY, 'stepModelMessages') ?? messageList.get.all.aiV5.model())
+            : messageList.get.input.aiV5.model(),
           outputWriter,
-          observe: noopObserve,
           // Pass current step span as parent for tool call spans
           tracingContext: modelSpanTracker?.getTracingContext(),
           // Pass workspace from the run scope (set by llmExecutionStep via prepareStep/processInputStep)
@@ -778,6 +780,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                   },
                   __streamState: streamState.serialize(),
                   __agentId: agentId,
+                  ...(agentVersionId ? { __agentVersionId: agentVersionId } : {}),
                   // Persist the inner suspended run id in the workflow snapshot, partitioned per
                   // tool call (resumeLabel = toolCallId). Persisted message metadata exposes the
                   // same id as delegatedRunId for cold reloads, while the snapshot remains the
@@ -827,6 +830,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                   toolCallSuspended: suspendPayload,
                   __streamState: streamState.serialize(),
                   __agentId: agentId,
+                  ...(agentVersionId ? { __agentVersionId: agentVersionId } : {}),
                   toolCallId: inputData.toolCallId,
                   toolName: inputData.toolName,
                   resumeLabel: options?.resumeLabel,
@@ -1022,6 +1026,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                     // tool pauses the bg-task run instead.
                     return resolvedTool.execute!(bgArgs, {
                       ...toolOptions,
+                      isBackgroundTask: true,
                       ...(opts?.resumeData !== undefined ? { resumeData: opts.resumeData } : {}),
                       suspend: async (data?: unknown, options?: SuspendOptions) => {
                         await toolOptions.suspend?.(data, options);
@@ -1049,7 +1054,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                       const bgRunId = chunk.payload.runId;
                       const replayKey = `${bgRunId}:${chunk.payload.toolCallId}`;
                       if (
-                        (bgRunId !== runId || (bgRunId === runId && workflowResumeData)) &&
+                        (bgRunId !== runId || (bgRunId === runId && workflowResumeData != null)) &&
                         !emittedReplayedToolCalls.has(replayKey)
                       ) {
                         safeEnqueue(
@@ -1269,7 +1274,7 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
                   // message so memory still records the result, even if it
                   // means a duplicate entry for that toolCallId.
                   if (!updated) {
-                    if (params.runId !== runId || (params.runId === runId && workflowResumeData)) {
+                    if (params.runId !== runId || (params.runId === runId && workflowResumeData != null)) {
                       messageList.add(
                         [
                           {
@@ -1351,7 +1356,10 @@ export function createToolCallStep<Tools extends ToolSet = ToolSet, OUTPUT = und
               resourceId: readScoped(scopeCtx, RESOURCE_ID_KEY, 'resourceId'),
               toolName: inputData.toolName,
             });
-            if (isSuspended && resumeDataToPassToToolOptions) {
+            // Nullish, not truthy: a tool with a primitive resumeSchema can be resumed with
+            // `false` / `0` / `''`, and treating those as "no resume data" would fall through to
+            // `dispatch()` below, leaving the suspended task stranded and starting a second one.
+            if (isSuspended && resumeDataToPassToToolOptions != null) {
               const task = await bgTask.resume(resumeDataToPassToToolOptions);
 
               return {

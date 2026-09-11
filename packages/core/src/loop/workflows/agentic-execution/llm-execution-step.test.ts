@@ -1110,11 +1110,13 @@ describe('createLLMExecutionStep gateway provider tools', () => {
     expect(controller.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'step-start',
-        payload: expect.not.objectContaining({
-          inputMessages: expect.any(Array),
+        payload: expect.objectContaining({
+          startedAt: expect.any(Number),
         }),
       }),
     );
+    const stepStartChunk = controller.enqueue.mock.calls.find(([chunk]) => chunk.type === 'step-start')?.[0];
+    expect(stepStartChunk?.payload).not.toHaveProperty('inputMessages');
   });
 
   it('stamps step-start.model from the processor-updated model', async () => {
@@ -2178,7 +2180,17 @@ describe('createLLMExecutionStep gateway provider tools', () => {
     });
   });
 
-  it('syncs outputStream.messageId with the rotated id on the API-error retry path', async () => {
+  it('rotates and seals the failed response on the API-error retry path', async () => {
+    messageList.add(
+      {
+        id: 'msg-0',
+        role: 'assistant',
+        createdAt: new Date(),
+        content: { format: 2, parts: [{ type: 'text', text: 'half a sentence' }] },
+      },
+      'response',
+    );
+
     const doStream = vi.fn(async () => {
       throw new APICallError({
         message: 'upstream failed',
@@ -2227,6 +2239,10 @@ describe('createLLMExecutionStep gateway provider tools', () => {
         serialize: vi.fn(),
         deserialize: vi.fn(),
       },
+      rotateResponseMessageId: (sealMessageId?: string) => {
+        messageList.markResponseMessageBoundary(sealMessageId);
+        return 'rotated-response-id';
+      },
       _internal: {
         generateId: () => 'rotated-response-id',
         threadId: 'thread-123',
@@ -2246,6 +2262,23 @@ describe('createLLMExecutionStep gateway provider tools', () => {
     // subsequent chunks written through the stream would split across two ids.
     expect(result.stepResult.reason).toBe('retry');
     expect(result.messageId).toBe('rotated-response-id');
+
+    // The rotated id only splits the transcript if the failed response was
+    // sealed; without the boundary the retry merges back under `msg-0`.
+    messageList.add(
+      {
+        id: result.messageId,
+        role: 'assistant',
+        createdAt: new Date(),
+        content: { format: 2, parts: [{ type: 'text', text: 'the retried answer' }] },
+      },
+      'response',
+    );
+    const assistantIds = messageList.get.all
+      .db()
+      .filter(message => message.role === 'assistant')
+      .map(message => message.id);
+    expect(assistantIds).toEqual(['msg-0', 'rotated-response-id']);
   });
 
   it('passes the rotated response message id to processor custom data writers', async () => {
@@ -2300,6 +2333,10 @@ describe('createLLMExecutionStep gateway provider tools', () => {
       streamState: {
         serialize: vi.fn(),
         deserialize: vi.fn(),
+      },
+      rotateResponseMessageId: (sealMessageId?: string) => {
+        messageList.markResponseMessageBoundary(sealMessageId);
+        return 'rotated-response-id';
       },
       _internal: {
         generateId: () => 'rotated-response-id',
@@ -2994,9 +3031,15 @@ describe('PROVIDER_TOOL_CALL observability spans', () => {
 
     await llmExecutionStep.execute(executeParams);
 
-    // Without a step tracker there is no live step to parent under — the span
-    // anchors to the AGENT_RUN fallback recorded at call time.
-    expect(modelStepSpan.createChildSpan).not.toHaveBeenCalled();
+    // Without a step tracker there is no live step to parent under — the provider tool span
+    // anchors to the AGENT_RUN fallback recorded at call time. The Anthropic input guard still
+    // records its processor span under the model step.
+    expect(modelStepSpan.createChildSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: SpanType.PROCESSOR_RUN,
+        name: 'input step processor: trailing-assistant-guard',
+      }),
+    );
     expect(agentRunSpan.createChildSpan).toHaveBeenCalledWith(
       expect.objectContaining({
         type: SpanType.PROVIDER_TOOL_CALL,
@@ -3111,7 +3154,12 @@ describe('PROVIDER_TOOL_CALL observability spans', () => {
         startTime: expect.any(Date),
       }),
     );
-    expect(modelStepSpan.createChildSpan).not.toHaveBeenCalled();
+    expect(modelStepSpan.createChildSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: SpanType.PROCESSOR_RUN,
+        name: 'input step processor: trailing-assistant-guard',
+      }),
+    );
     expect(providerToolSpan.end).toHaveBeenCalledWith(undefined);
   });
 });

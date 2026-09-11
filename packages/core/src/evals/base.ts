@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod/v4';
 import { Agent, isSupportedLanguageModel } from '../agent';
+import type { AgentExecutionOptions } from '../agent';
 import type { MastraDBMessage, MastraMessagePart, MastraToolInvocationPart } from '../agent/message-list';
 import type { AgentMemoryOption, ToolsInput } from '../agent/types';
 import { tryStreamWithJsonFallback } from '../agent/utils';
@@ -41,6 +42,7 @@ import type { MastraOnStepFinishCallback } from '../stream/types';
 import { selectFields } from '../utils';
 import { createWorkflow } from '../workflows/create';
 import { createStep } from '../workflows/workflow';
+import type { ScoringFilter } from './predicate';
 import type {
   ScoringSamplingConfig,
   ScorerRunInputForAgent,
@@ -121,6 +123,13 @@ export interface ScorerJudgeConfig {
    * 10. Set this explicitly to bound the coordinated retry budget.
    */
   maxProcessorRetries?: number;
+  /**
+   * Optional model call settings (e.g. temperature, topP, topK, maxOutputTokens,
+   * maxRetries, frequencyPenalty, presencePenalty, timeout) forwarded to the
+   * internal judge agent run. Step-level `judge.modelSettings` replaces this
+   * scorer-level value.
+   */
+  modelSettings?: AgentExecutionOptions['modelSettings'];
   /**
    * Optional request context forwarded to the judge agent execution. When the judge
    * agent has memory with OM observers that read dynamic model config from controller
@@ -1385,6 +1394,7 @@ class MastraScorer<
     const outputProcessors = originalStep.judge?.outputProcessors ?? this.config.judge?.outputProcessors;
     const errorProcessors = originalStep.judge?.errorProcessors ?? this.config.judge?.errorProcessors;
     const maxProcessorRetries = originalStep.judge?.maxProcessorRetries ?? this.config.judge?.maxProcessorRetries;
+    const modelSettings = originalStep.judge?.modelSettings ?? this.config.judge?.modelSettings;
     const memoryOptions = stepMemoryOptions
       ? {
           ...defaultMemoryOptions,
@@ -1594,6 +1604,7 @@ class MastraScorer<
       ...observabilityContext,
       ...(memoryOptions ? { memory: memoryOptions } : {}),
       ...(maxSteps ? { maxSteps } : {}),
+      ...(modelSettings ? { modelSettings } : {}),
       ...(this.config.judge?.requestContext ? { requestContext: this.config.judge.requestContext } : {}),
     };
     const createJudgeStreamRunOptions = () => ({
@@ -1865,6 +1876,29 @@ class MastraScorer<
 }
 
 // Overload: enum type shortcuts (e.g., type: 'agent')
+/**
+ * Creates a scorer builder for evaluating input/output pairs.
+ * Add a `generateScore` stage before running the scorer.
+ *
+ * @example
+ * ```typescript
+ * import { createScorer } from '@mastra/core/evals';
+ *
+ * const scorer = createScorer({
+ *   id: 'response-presence',
+ *   description: 'Check whether the agent produced any output messages.',
+ *   type: 'agent',
+ * }).generateScore(({ run }) => (run.output.length > 0 ? 1 : 0));
+ * ```
+ *
+ * @see For documentation bundled with your installed package, locate
+ * `@mastra/core/package.json` with your project's resolver or package-manager
+ * tooling, then read `dist/docs/SKILL.md` from that package root and follow its
+ * reference links. Use package-manager tools for virtual or archived packages.
+ *
+ * @see [Scorer documentation](https://mastra.ai/reference/evals/create-scorer)
+ * if packaged docs are unavailable.
+ */
 export function createScorer<TID extends string, TType extends keyof ScorerTypeShortcuts>(
   config: Omit<ScorerConfig<TID, any, any>, 'type'> & {
     type: TType;
@@ -1898,6 +1932,12 @@ export function createScorer(config: any): any {
 export type MastraScorerEntry = {
   scorer: MastraScorer<any, any, any, any>;
   sampling?: ScoringSamplingConfig;
+  /**
+   * Declarative eligibility filter, evaluated before sampling (filter →
+   * sample): the sampling rate applies to qualifying traffic only. JSON-safe,
+   * so it survives durable-agent serialization. See `evals/predicate.ts`.
+   */
+  filter?: ScoringFilter;
 };
 
 export type MastraScorers = Record<string, MastraScorerEntry>;

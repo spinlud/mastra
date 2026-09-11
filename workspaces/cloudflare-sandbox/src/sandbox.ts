@@ -46,16 +46,28 @@ export interface CloudflareSandboxOptions extends Omit<MastraSandboxOptions, 'pr
 }
 
 /**
+ * Absolute path to the shell used to interpret bare command strings. Absolute so it
+ * resolves even when a custom PATH excludes the standard system directories.
+ */
+const SHELL_PATH = '/bin/bash';
+
+/**
  * Builds the argv array sent to the bridge. The bridge applies ANSI-C quoting to
  * every element, so no local escaping is needed. Environment variables are applied
  * with `env`, which keeps each assignment a separate argv element.
+ *
+ * When no separate arguments are supplied (the shape the built-in Workspace
+ * `execute_command` tool uses), `command` is a shell command string — pipes,
+ * chaining, quoting, redirection — so it is run through a non-login shell rather
+ * than treated as a single executable name. When explicit arguments are given,
+ * each element stays a literal argv token.
  */
 function buildArgv(command: string, args: string[] | undefined, env: Record<string, string>): string[] {
   const assignments = Object.entries(env).map(([key, value]) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`Invalid environment variable name: ${key}`);
     return `${key}=${value}`;
   });
-  const invocation = [command, ...(args ?? [])];
+  const invocation = args && args.length > 0 ? [command, ...args] : [SHELL_PATH, '-c', command];
   return assignments.length ? ['env', ...assignments, ...invocation] : invocation;
 }
 
@@ -75,8 +87,6 @@ export class CloudflareSandbox extends MastraSandbox {
   status: ProviderStatus = 'pending';
 
   private readonly client: BridgeClient;
-  private readonly env: Record<string, string>;
-  private readonly workingDirectory?: string;
   private readonly commandTimeout: number;
   private readonly instructions?: InstructionsOption;
   private sandboxId?: string;
@@ -89,8 +99,6 @@ export class CloudflareSandbox extends MastraSandbox {
     this.id = options.id ?? `cloudflare-sandbox-${randomUUID()}`;
     this.name = name;
     this.sandboxId = options.sandboxId;
-    this.env = { ...options.env };
-    this.workingDirectory = options.workingDirectory;
     this.commandTimeout = options.commandTimeout ?? DEFAULT_COMMAND_TIMEOUT_MS;
     this.instructions = options.instructions;
     this.client =
@@ -145,7 +153,7 @@ export class CloudflareSandbox extends MastraSandbox {
     let exitCode = 1;
 
     const env = Object.fromEntries(
-      Object.entries({ ...this.env, ...options?.env }).filter(
+      Object.entries({ ...this.getEnv(), ...options?.env }).filter(
         (entry): entry is [string, string] => entry[1] !== undefined,
       ),
     );

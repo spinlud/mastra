@@ -16,6 +16,7 @@ import type {
 import type { CallSettings, ModelMessage, StepResult, ToolSet, TypedToolCall, UIMessage } from '@internal/ai-sdk-v5';
 import type { AIV5ResponseMessage } from '../agent/message-list';
 import type { AIV5Type, MastraDBMessage } from '../agent/message-list/types';
+import type { AgentSignalType } from '../agent/signals';
 import type { StructuredOutputOptions } from '../agent/types';
 import type { ModelConfigModelSettings } from '../llm/model/model-settings';
 import type { MastraLanguageModel, SharedProviderOptions } from '../llm/model/shared.types';
@@ -146,6 +147,19 @@ export interface FilePayload {
   base64?: string;
   mimeType: string;
   filename?: string;
+  providerMetadata?: ProviderMetadata;
+}
+
+export interface ReasoningFilePayload {
+  data: string | Uint8Array;
+  base64?: string;
+  mimeType: string;
+  providerMetadata?: ProviderMetadata;
+}
+
+export interface CustomPayload {
+  /** The kind of custom content, in the format `{provider}.{provider-type}`. */
+  kind: string;
   providerMetadata?: ProviderMetadata;
 }
 
@@ -280,6 +294,8 @@ interface StartPayload {
 
 export interface StepStartPayload {
   messageId?: string;
+  /** Epoch milliseconds sampled immediately before the model provider call. Absent when no provider call occurred. */
+  startedAt?: number;
   request: {
     body?: string;
     [key: string]: unknown;
@@ -855,6 +871,8 @@ export type AgentChunkType<OUTPUT = undefined> =
   | (BaseChunkType & { type: 'redacted-reasoning'; payload: RedactedReasoningPayload })
   | (BaseChunkType & { type: 'source'; payload: SourcePayload })
   | (BaseChunkType & { type: 'file'; payload: FilePayload })
+  | (BaseChunkType & { type: 'reasoning-file'; payload: ReasoningFilePayload })
+  | (BaseChunkType & { type: 'custom'; payload: CustomPayload })
   | (BaseChunkType & { type: 'tool-call'; payload: ToolCallPayload })
   | (BaseChunkType & { type: 'tool-call-approval'; payload: ToolCallApprovalPayload })
   | (BaseChunkType & { type: 'tool-call-suspended'; payload: ToolCallSuspendedPayload })
@@ -1051,6 +1069,8 @@ export type CreateStream = () => Promise<LanguageModelV2StreamResult>;
 
 export type SourceChunk = BaseChunkType & { type: 'source'; payload: SourcePayload };
 export type FileChunk = BaseChunkType & { type: 'file'; payload: FilePayload };
+export type ReasoningFileChunk = BaseChunkType & { type: 'reasoning-file'; payload: ReasoningFilePayload };
+export type CustomChunk = BaseChunkType & { type: 'custom'; payload: CustomPayload };
 export type ToolCallChunk = BaseChunkType & { type: 'tool-call'; payload: ToolCallPayload };
 export type ToolResultChunk = BaseChunkType & { type: 'tool-result'; payload: ToolResultPayload };
 export type ToolOutputDeniedChunk = BaseChunkType & { type: 'tool-output-denied'; payload: ToolOutputDeniedPayload };
@@ -1073,6 +1093,7 @@ export type ExecuteStreamModelManager<T> = (
 export type ModelManagerModelConfig = {
   model: MastraLanguageModel;
   maxRetries: number;
+  maxRetriesConfigured?: boolean;
   id: string;
   headers?: Record<string, string>;
   modelSettings?: ModelConfigModelSettings;
@@ -1162,6 +1183,8 @@ export type MastraModelOutputOptions<OUTPUT = undefined> = {
   transportRef?: StreamTransportRef;
   /** Experimental transforms applied whenever `fullStream` is consumed. */
   experimentalTransform?: MastraStreamTransformOptions<OUTPUT>;
+  /** @internal Signal exclusions for caller-facing streams, not internal fanout. */
+  hideSignals?: boolean | AgentSignalType[];
 } & Partial<ObservabilityContext>;
 
 /**

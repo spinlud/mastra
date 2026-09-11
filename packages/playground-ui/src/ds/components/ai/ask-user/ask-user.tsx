@@ -25,7 +25,7 @@ export interface AskUserResult {
 }
 
 export const AskUserContainer = ({ className, ...props }: ComponentProps<'div'>) => (
-  <div className={cn('rounded-lg border border-border1 bg-surface2 p-3 text-sm', className)} {...props} />
+  <div className={cn('rounded-lg border border-border1 bg-surface2 p-3 text-ui-md', className)} {...props} />
 );
 
 export const AskUserQuestion = ({ className, ...props }: ComponentProps<'legend'>) => (
@@ -79,7 +79,7 @@ export const AskUserOutput = ({ result, className, ...props }: AskUserOutputProp
     className={cn('space-y-2 rounded-md bg-surface3 p-3 text-neutral5', result.isError && 'text-error', className)}
     {...props}
   >
-    <Badge size="xs" variant={result.isError ? 'error' : 'success'}>
+    <Badge size="xs" variant={result.isError ? 'red' : 'green'}>
       {result.isError ? 'Error' : 'Answered'}
     </Badge>
     <p>{result.content}</p>
@@ -122,7 +122,7 @@ const AskUserInput = ({
     return (
       <AskUserContainer data-testid="ask-user" {...props}>
         <p className="text-neutral6 mb-2 font-medium">{payload.question}</p>
-        {result ? <AskUserOutput result={result} /> : <Badge variant="success">Answered</Badge>}
+        {result ? <AskUserOutput result={result} /> : <Badge variant="green">Answered</Badge>}
       </AskUserContainer>
     );
   }

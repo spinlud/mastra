@@ -12,8 +12,8 @@ import type {
 const OBSERVABILITY_UPGRADE_MESSAGE =
   'DuckDB observability storage requires `@mastra/core` with observability storage support. Upgrade `@mastra/core` to use this store.';
 const OBSERVABILITY_DELTA_POLLING_FEATURE = 'observability-delta-polling';
-const DUCKDB_OBSERVABILITY_FEATURES = ['metrics', 'logs'] as const;
-const DUCKDB_OBSERVABILITY_DELTA_FEATURES = ['metrics', 'logs', 'delta-polling'] as const;
+const DUCKDB_OBSERVABILITY_FEATURES = ['metrics', 'logs', 'trace-query'] as const;
+const DUCKDB_OBSERVABILITY_DELTA_FEATURES = ['metrics', 'logs', 'delta-polling', 'trace-query'] as const;
 
 function isObservabilityCompatibilityError(error: unknown): boolean {
   if (!(error instanceof Error)) {
@@ -203,6 +203,13 @@ export class ObservabilityStorageDuckDB extends CoreObservabilityStorage {
     return delegate.listTraces(...args);
   }
 
+  async queryTraces(
+    ...args: Parameters<ObservabilityStoreImpl['queryTraces']>
+  ): ReturnType<ObservabilityStoreImpl['queryTraces']> {
+    const delegate = await this.requireDelegate();
+    return delegate.queryTraces(...args);
+  }
+
   async listTracesLight(
     ...args: Parameters<ObservabilityStoreImpl['listTracesLight']>
   ): ReturnType<ObservabilityStoreImpl['listTracesLight']> {
@@ -362,6 +369,13 @@ export class ObservabilityStorageDuckDB extends CoreObservabilityStorage {
     return delegate.batchCreateScores(...args);
   }
 
+  async deleteScores(
+    ...args: Parameters<ObservabilityStoreImpl['deleteScores']>
+  ): ReturnType<ObservabilityStoreImpl['deleteScores']> {
+    const delegate = await this.requireDelegate();
+    return delegate.deleteScores(...args);
+  }
+
   async listScores(
     ...args: Parameters<ObservabilityStoreImpl['listScores']>
   ): ReturnType<ObservabilityStoreImpl['listScores']> {
@@ -418,11 +432,25 @@ export class ObservabilityStorageDuckDB extends CoreObservabilityStorage {
     return delegate.batchCreateFeedback(...args);
   }
 
+  async deleteFeedback(
+    ...args: Parameters<ObservabilityStoreImpl['deleteFeedback']>
+  ): ReturnType<ObservabilityStoreImpl['deleteFeedback']> {
+    const delegate = await this.requireDelegate();
+    return delegate.deleteFeedback(...args);
+  }
+
   async listFeedback(
     ...args: Parameters<ObservabilityStoreImpl['listFeedback']>
   ): ReturnType<ObservabilityStoreImpl['listFeedback']> {
     const delegate = await this.requireDelegate();
     return delegate.listFeedback(...args);
+  }
+
+  async updateFeedbackReviewStatus(
+    ...args: Parameters<ObservabilityStoreImpl['updateFeedbackReviewStatus']>
+  ): ReturnType<ObservabilityStoreImpl['updateFeedbackReviewStatus']> {
+    const delegate = await this.requireDelegate();
+    return delegate.updateFeedbackReviewStatus(...args);
   }
 
   async getFeedbackAggregate(

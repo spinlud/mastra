@@ -1,12 +1,14 @@
+import type { SignalCatalogEntry } from '@mastra/client-js';
 import { X } from 'lucide-react';
 import { getSignalHue } from './signal-colors';
-import { formatSignalName } from './signal-formatting';
+import { signalLabel } from './signal-formatting';
 import type { ThemeSelection } from './theme-drilldown-data';
+import { useTraceIntelligence } from './use-trace-intelligence';
 import { Button } from '@/ds/components/Button';
 import { nodeColor } from '@/ds/components/SankeyChart';
 
-function selectionLabel(selection: ThemeSelection) {
-  return `${formatSignalName(selection.signalName)} · ${selection.kind === 'theme' ? selection.label : 'Noise'}`;
+function selectionLabel(catalog: readonly SignalCatalogEntry[], selection: ThemeSelection) {
+  return `${signalLabel(catalog, selection.signalName)} · ${selection.kind === 'theme' ? selection.label : 'Noise'}`;
 }
 
 function filterSummary({
@@ -49,6 +51,7 @@ export function ThemeFilterBanner({
   onRemove: (signalName: ThemeSelection['signalName']) => void;
   onClear: () => void;
 }) {
+  const { signalCatalog } = useTraceIntelligence();
   const colors = selections.map(selection => nodeColor(getSignalHue(selection.signalName)));
   const latestSelection = selections.at(-1);
   const backgroundGradient = `linear-gradient(90deg, ${colors
@@ -70,19 +73,21 @@ export function ThemeFilterBanner({
           <button
             key={selection.signalName}
             aria-label={
-              selections.length === 1 ? `Clear ${selection.kind} filter` : `Clear filter ${selectionLabel(selection)}`
+              selections.length === 1
+                ? `Clear ${selection.kind} filter`
+                : `Clear filter ${selectionLabel(signalCatalog, selection)}`
             }
-            className="border-border1 bg-surface2 text-neutral6 hover:bg-surface4 flex items-center gap-1.5 rounded-full border py-1 pr-2 pl-2.5 text-xs font-medium transition-colors"
+            className="border-border1 bg-surface2 text-neutral6 hover:bg-surface4 text-ui-sm flex items-center gap-1.5 rounded-full border py-1 pr-2 pl-2.5 font-medium transition-colors"
             onClick={() => onRemove(selection.signalName)}
             type="button"
           >
             <span aria-hidden="true" className="rounded-0.5 size-2" style={{ backgroundColor: color }} />
-            {selectionLabel(selection)}
+            {selectionLabel(signalCatalog, selection)}
             <X aria-hidden="true" className="size-3.5" />
           </button>
         );
       })}
-      <span className="text-neutral4 text-xs">
+      <span className="text-neutral4 text-ui-sm">
         {filterSummary({ selections, filteredTraceCount, totalTraceCount, isUnavailable })}
       </span>
       {!isUnavailable && filteredTraceCount !== undefined && latestSelection ? (
@@ -90,7 +95,7 @@ export function ThemeFilterBanner({
           aria-label={
             latestSelection.kind === 'theme'
               ? `View theme details for ${latestSelection.label}`
-              : `View noise details for ${formatSignalName(latestSelection.signalName)}`
+              : `View noise details for ${signalLabel(signalCatalog, latestSelection.signalName)}`
           }
           onClick={() => onViewDetails(latestSelection)}
           size="sm"

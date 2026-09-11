@@ -9,6 +9,7 @@ import type { InputProcessorOrWorkflow, OutputProcessorOrWorkflow, ErrorProcesso
 import type { ProcessorState } from '../../processors/runner';
 import {
   RequestContext,
+  MASTRA_AUTH_TOKEN_KEY,
   MASTRA_INHERITED_MEMORY_KEY,
   MASTRA_VERSIONS_KEY,
   mergeVersionOverrides,
@@ -36,7 +37,10 @@ import type {
   ToolsetsInput,
   ToolsInput,
 } from '../types';
-import { fireClientToolOutputHooks } from '../workflows/prepare-stream/client-tool-output-hooks';
+import {
+  applyClientToolModelOutput,
+  fireClientToolOutputHooks,
+} from '../workflows/prepare-stream/client-tool-output-hooks';
 import type { DurableAgenticWorkflowInput, RunRegistryEntry, SerializableStructuredOutput } from './types';
 import { createWorkflowInput } from './utils/serialize-state';
 import { generateDurableThreadTitle } from './workflows/finalize-run';
@@ -59,6 +63,12 @@ function snapshotRequestContextEntries(
     // workflow input and hand the resumed run an object whose methods are gone; the
     // resumed agent resolves memory from its own config instead.
     if (key === MASTRA_INHERITED_MEMORY_KEY) continue;
+    // Framework-managed per-run memory context is rebuilt from persisted run
+    // state. A caller may carry a parent run's serializable value here.
+    if (key === 'MastraMemory') continue;
+    // Never persist the framework-managed bearer token in durable workflow
+    // input; a resumed authenticated request supplies its own fresh token.
+    if (key === MASTRA_AUTH_TOKEN_KEY) continue;
     // Serialize each entry exactly once with a bounded pass: a shared-reference
     // graph would otherwise make JSON.stringify expand exponentially and wedge
     // the event loop on every durable step, and reading the value twice (probe
@@ -521,6 +531,13 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
       abortSignal: execOptions?.abortSignal,
       logger,
     });
+    // Apply server-defined toModelOutput to client-executed results by
+    // enriching the ingested MessageList parts.
+    await applyClientToolModelOutput({
+      messageList,
+      tools,
+      logger,
+    });
   }
 
   const modelList = await typedAgent.getModelList(requestContext);
@@ -635,7 +652,7 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
       autoResumeSuspendedTools: execOptions?.autoResumeSuspendedTools,
       maxProcessorRetries: execOptions?.maxProcessorRetries,
       includeRawChunks: execOptions?.includeRawChunks,
-      returnScorerData: (execOptions as any)?.returnScorerData,
+      returnScorerData: execOptions?.returnScorerData,
       hasErrorProcessors: errorProcessors.length > 0,
       providerOptions: execOptions?.providerOptions,
       structuredOutput: serializedStructuredOutput,
@@ -750,6 +767,10 @@ export async function prepareForDurableExecution<OUTPUT = undefined>(
           schema: toStandardSchema(execOptions.structuredOutput.schema),
         }
       : undefined,
+    // Call-time returnScorerData flag. Also serialized into the workflow
+    // input; parked here too so warm resume()/observe() can rebuild
+    // scoringData without re-reading the snapshot.
+    returnScorerData: execOptions?.returnScorerData,
     cleanup: () => {},
   };
 

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { embedMany } from '@internal/ai-sdk-v4';
 import type { TextPart } from '@internal/ai-sdk-v4';
 import { embedMany as embedManyV5 } from '@internal/ai-sdk-v5';
@@ -16,6 +17,7 @@ import type {
   MessageDeleteInput,
   ObservationalMemoryOptions,
   MemoryConfig,
+  MemoryRunState,
 } from '@mastra/core/memory';
 import { SpanType, EntityType } from '@mastra/core/observability';
 import type { ObservabilityContext, MemoryOperationAttributes } from '@mastra/core/observability';
@@ -51,12 +53,9 @@ import { LRUCache } from 'lru-cache';
 import xxhash from 'xxhash-wasm';
 import type { ObservationalMemory, ObservationalMemoryConfig } from './processors/observational-memory';
 import { KnowledgeSemanticIndexCoordinator, Subconscious } from './processors/observational-memory/subconscious';
-import { createCuratorHandler } from './processors/observational-memory/subconscious/curate';
 import { createKnowledgeTools } from './processors/observational-memory/subconscious/knowledge-tools';
-import {
-  composeReflectionAgentHandlers,
-  createLearnerHandler,
-} from './processors/observational-memory/subconscious/learn';
+import { getRemindThreadId, isOwnedRemindThread } from './processors/observational-memory/subconscious/remind-protocol';
+import { createAskMemoryTool } from './processors/observational-memory/subconscious/remind-questions';
 import { summarizeConversation, SUMMARIZE_THREAD_DEFAULTS } from './processors/observational-memory/summarize';
 import type {
   SummarizeConversationOptions,
@@ -90,15 +89,9 @@ export type {
   ResolvedSubconsciousConfig,
   SubconsciousBuiltInObservationAgent,
   SubconsciousBuiltInObservationConfig,
-  SubconsciousBuiltInReflectionAgent,
-  SubconsciousBuiltInReflectionConfig,
-  SubconsciousCaptureHook,
-  SubconsciousCaptureOutput,
   SubconsciousConfig,
   SubconsciousCustomObservationConfig,
-  SubconsciousCustomReflectionConfig,
   SubconsciousObservationEntry,
-  SubconsciousReflectionEntry,
 } from './processors/observational-memory/subconscious';
 export { summarizeConversation, SUMMARIZE_THREAD_DEFAULTS } from './processors/observational-memory/summarize';
 export type {
@@ -241,10 +234,55 @@ function isSystemReminderMessage(message: MastraDBMessage): boolean {
   return typeof firstTextPart?.text === 'string' && firstTextPart.text.startsWith('<system-reminder');
 }
 
+// Keep this union and the recall helpers in sync with core without requiring newer peer exports.
+type RecallSignalType = 'user' | 'state' | 'reactive' | 'notification' | 'user-message' | 'system-reminder';
+
+function isRecallSignalType(type: unknown): type is RecallSignalType {
+  return (
+    type === 'user' ||
+    type === 'state' ||
+    type === 'reactive' ||
+    type === 'notification' ||
+    type === 'user-message' ||
+    type === 'system-reminder'
+  );
+}
+
+function getRecallSignalType(message: MastraDBMessage): RecallSignalType | undefined {
+  if (!isRecord(message.content)) return undefined;
+
+  for (const part of message.content.parts) {
+    if (
+      (part.type === 'data-signal' || part.type === 'data-user-message') &&
+      isRecord(part.data) &&
+      isRecallSignalType(part.data.type)
+    ) {
+      return part.data.type;
+    }
+  }
+
+  const metadata = message.content.metadata;
+  if (message.role === 'signal' && isRecord(metadata) && isRecord(metadata.signal)) {
+    if (isRecallSignalType(metadata.signal.type)) return metadata.signal.type;
+  }
+
+  return isSystemReminderMessage(message) ? 'system-reminder' : undefined;
+}
+
 function filterSystemReminderMessages(
   messages: MastraDBMessage[],
   includeSystemReminders?: boolean,
+  hideSignals?: boolean | RecallSignalType[],
 ): MastraDBMessage[] {
+  if (hideSignals === false) return messages;
+  if (hideSignals !== undefined) {
+    return messages.filter(message => {
+      const type = getRecallSignalType(message);
+      return type === undefined || (hideSignals !== true && !hideSignals.includes(type));
+    });
+  }
+
+  // TODO: In the next breaking release, align the history default with streams (exclude none).
   if (includeSystemReminders) {
     return messages;
   }
@@ -299,8 +337,35 @@ const VECTOR_DELETE_BATCH_SIZE = 100;
 const DEFAULT_EMBEDDING_CACHE_MAX_SIZE = 1000;
 
 /**
- * Concrete implementation of MastraMemory that adds support for thread configuration
- * and message injection.
+ * Gives Mastra agents conversation history, with optional working memory,
+ * semantic recall, and observational memory.
+ *
+ * @remarks
+ * Configure storage on this instance or its Mastra instance before use.
+ * See the bundled docs for setup and conversation identifiers.
+ *
+ * @example
+ * Attach memory to an agent; `yourModel` is your configured model.
+ * ```typescript
+ * import { Agent } from '@mastra/core/agent';
+ * import { Memory } from '@mastra/memory';
+ *
+ * const agent = new Agent({
+ *   id: 'assistant',
+ *   name: 'Assistant',
+ *   instructions: 'You are a helpful assistant.',
+ *   model: yourModel,
+ *   memory: new Memory(),
+ * });
+ * ```
+ *
+ * @see For documentation bundled with your installed package, locate
+ * `@mastra/memory/package.json` with your project's resolver or package-manager
+ * tooling, then read `dist/docs/SKILL.md` from that package root and follow its
+ * reference links. Use package-manager tools for virtual or archived packages.
+ *
+ * @see [Memory documentation](https://mastra.ai/docs/memory/overview)
+ * if packaged docs are unavailable.
  */
 export class Memory extends MastraMemory {
   private _omEngine: Promise<ObservationalMemory | null> | undefined;
@@ -369,6 +434,19 @@ export class Memory extends MastraMemory {
     }
   }
 
+  /** @internal Creates isolated memory for a derived subconscious agent. */
+  createSubconsciousMemory(): Memory {
+    const memory = new Memory({
+      storage: this.storage,
+      vector: this.vector,
+      embedder: this.embedder,
+      embedderOptions: this.embedderOptions,
+      options: { observationalMemory: false },
+    });
+    if (this._mastraInstance) memory.__registerMastra(this._mastraInstance);
+    return memory;
+  }
+
   public override getMergedThreadConfig(config?: MemoryConfigInternal): MemoryConfigInternal {
     const merged = super.getMergedThreadConfig(config);
     return this.applyManagedWorkingMemoryDefaults(this.applySubconsciousDefaults(merged));
@@ -386,8 +464,12 @@ export class Memory extends MastraMemory {
     const observation = (omConfig.observation ?? {}) as NonNullable<ObservationalMemoryConfig['observation']>;
     const extract = observation.extract ?? [];
     const existingSlugs = new Set(extract.map(extractor => extractor.slug));
+    let curatorMemory: Memory | undefined;
     const subconsciousExtractors = omConfig.experimental_subconscious
-      .createObservationExtractors(observation.model ?? omConfig.model)
+      .createObservationExtractors(
+        observation.model ?? omConfig.model,
+        () => (curatorMemory ??= new Memory({ storage: this.storage, options: { observationalMemory: false } })),
+      )
       .filter(extractor => !existingSlugs.has(extractor.slug));
 
     return {
@@ -400,54 +482,6 @@ export class Memory extends MastraMemory {
         },
       },
     } as MemoryConfigInternal;
-  }
-
-  /** Threads with a curation currently in flight in this process; guards same-process double-fire only. */
-  private _curationsInFlight = new Set<string>();
-
-  /**
-   * Run the subconscious curator directly over the pending fact worklist, without a reflection.
-   * Cross-process serialization is the curation cursor's job; a lost race wastes one advisory run.
-   *
-   * Outcomes: `ran` (curator executed), `no-op` (empty worklist and no prompt, or no curate agent
-   * configured), `skipped` (a curation for this thread is already in flight in this process), and
-   * `no-model` (no per-agent, observational memory, or main-agent model could be resolved).
-   */
-  async runCuration(options: {
-    threadId: string;
-    resourceId: string;
-    requestContext?: RequestContext;
-    prompt?: string;
-  }): Promise<{ outcome: 'ran' | 'no-op' | 'skipped' | 'no-model' }> {
-    const omConfig = normalizeObservationalMemoryConfig(this.threadConfig.observationalMemory);
-    const subconscious = omConfig?.experimental_subconscious;
-    if (!omConfig || !(subconscious instanceof Subconscious)) return { outcome: 'no-op' };
-    if (this._curationsInFlight.has(options.threadId)) return { outcome: 'skipped' };
-    this._curationsInFlight.add(options.threadId);
-    try {
-      const handler = createCuratorHandler(
-        this,
-        subconscious.resolved,
-        new Memory({ storage: this.storage, options: { observationalMemory: false } }),
-        { omModel: omConfig.observation?.model ?? omConfig.model },
-      );
-      const outcome = await handler({
-        parentThreadId: options.threadId,
-        resourceId: options.resourceId,
-        // The direct path has no reflection artifacts; the optional prompt (e.g. a phase-exit
-        // framing) rides the observations slot of the curator's own prompt structure.
-        observations: options.prompt ?? '',
-        requestContext: options.requestContext,
-      });
-      return { outcome: outcome === 'ran' ? 'ran' : 'no-op' };
-    } catch (error) {
-      if (error instanceof Error && error.message.includes('requires the main agent to resolve its model')) {
-        return { outcome: 'no-model' };
-      }
-      throw error;
-    } finally {
-      this._curationsInFlight.delete(options.threadId);
-    }
   }
 
   private applyManagedWorkingMemoryDefaults(config: MemoryConfigInternal): MemoryConfigInternal {
@@ -607,7 +641,10 @@ export class Memory extends MastraMemory {
     args: StorageListMessagesInput & {
       threadConfig?: MemoryConfigInternal;
       vectorSearchString?: string;
+      /** @deprecated Use hideSignals: [] to include all, or ['reactive', 'system-reminder'] to hide reminders. */
       includeSystemReminders?: boolean;
+      /** true hides all recognized signals, false includes all, or select exact stored types with an array. Overrides includeSystemReminders. */
+      hideSignals?: boolean | RecallSignalType[];
       threadId: string;
       observabilityContext?: Partial<ObservabilityContext>;
     },
@@ -628,7 +665,9 @@ export class Memory extends MastraMemory {
       threadConfig,
       vectorSearchString,
       includeSystemReminders,
+      hideSignals,
       filter,
+      includeTotal,
     } = args;
     const config = this.getMergedThreadConfig(threadConfig || {});
     const semanticRecallEnabled = Boolean(config.semanticRecall);
@@ -774,6 +813,7 @@ export class Memory extends MastraMemory {
         page,
         orderBy: effectiveOrderBy,
         filter,
+        ...(includeTotal !== undefined ? { includeTotal } : {}),
         ...(filteredVectorResults?.length
           ? {
               include: filteredVectorResults.map(r => ({
@@ -797,7 +837,7 @@ export class Memory extends MastraMemory {
       const list = new MessageList({ threadId, resourceId }).add(rawMessages, 'memory');
 
       // Always return mastra-db format (V2)
-      const messages = filterSystemReminderMessages(list.get.all.db(), includeSystemReminders);
+      const messages = filterSystemReminderMessages(list.get.all.db(), includeSystemReminders, hideSignals);
 
       const { total, page: resultPage, perPage: resultPerPage, hasMore } = paginatedResult;
       const recallResult = { messages, usage, total, page: resultPage, perPage: resultPerPage, hasMore };
@@ -915,9 +955,19 @@ export class Memory extends MastraMemory {
   async deleteThread(threadId: string): Promise<void> {
     const memoryStore = await this.getMemoryStore();
     const thread = await memoryStore.getThreadById({ threadId });
+    const remindThreadId = getRemindThreadId(threadId);
+    const remindThread = thread?.resourceId ? await memoryStore.getThreadById({ threadId: remindThreadId }) : null;
+
+    if (thread?.resourceId && isOwnedRemindThread(remindThread, threadId, thread.resourceId)) {
+      await this.deleteStoredThread(memoryStore, remindThreadId, remindThread.resourceId);
+    }
+    await this.deleteStoredThread(memoryStore, threadId, thread?.resourceId);
+  }
+
+  private async deleteStoredThread(memoryStore: MemoryStorage, threadId: string, resourceId?: string): Promise<void> {
     await memoryStore.deleteThread({ threadId });
-    if (thread?.resourceId && memoryStore.supportsObservationalMemory) {
-      await memoryStore.clearObservationalMemory(threadId, thread.resourceId);
+    if (resourceId && memoryStore.supportsObservationalMemory) {
+      await memoryStore.clearObservationalMemory(threadId, resourceId);
     }
     if (this.vector) {
       this.trackVectorCleanup(this.deleteThreadVectors(threadId));
@@ -1566,10 +1616,12 @@ ${workingMemory}`;
     threadId,
     resourceId,
     memoryConfig,
+    runState,
   }: {
     threadId: string;
     resourceId?: string;
     memoryConfig?: MemoryConfigInternal;
+    runState?: MemoryRunState;
   }): Promise<string | null> {
     const config = this.getMergedThreadConfig(memoryConfig || {});
     if (!config.workingMemory?.enabled) {
@@ -1588,13 +1640,16 @@ ${workingMemory}`;
     }
 
     if (scope === 'resource' && resourceId) {
-      // Get working memory from resource table
-      const memoryStore = await this.getMemoryStore();
-      const resource = await memoryStore.getResourceById({ resourceId });
-      workingMemoryData = resource?.workingMemory || null;
+      const loadWorkingMemory = async () => {
+        const memoryStore = await this.getMemoryStore();
+        const resource = await memoryStore.getResourceById({ resourceId });
+        return resource?.workingMemory || null;
+      };
+      workingMemoryData = runState
+        ? await runState.load(`working-memory:resource:${resourceId}`, loadWorkingMemory)
+        : await loadWorkingMemory();
     } else {
-      // Get working memory from thread metadata (default behavior)
-      const thread = await this.getThreadById({ threadId });
+      const thread = runState?.threadLoaded ? runState.thread : await this.getThreadById({ threadId });
       workingMemoryData = thread?.metadata?.workingMemory as string;
     }
 
@@ -1654,10 +1709,12 @@ ${workingMemory}`;
     threadId,
     resourceId,
     memoryConfig,
+    runState,
   }: {
     threadId: string;
     resourceId?: string;
     memoryConfig?: MemoryConfigInternal;
+    runState?: MemoryRunState;
   }): Promise<string | null> {
     const config = this.getMergedThreadConfig(memoryConfig);
     this.assertWorkingMemoryStateSignalsCompatibility(config);
@@ -1672,8 +1729,16 @@ ${workingMemory}`;
       return null;
     }
 
-    const workingMemoryTemplate = await this.getWorkingMemoryTemplate({ memoryConfig });
-    const workingMemoryData = await this.getWorkingMemory({ threadId, resourceId, memoryConfig: config });
+    const loadTemplate = () => this.getWorkingMemoryTemplate({ memoryConfig });
+    const workingMemoryTemplate = runState
+      ? await runState.load('working-memory:template', loadTemplate)
+      : await loadTemplate();
+    const workingMemoryData = await this.getWorkingMemory({
+      threadId,
+      resourceId,
+      memoryConfig: config,
+      runState,
+    });
 
     if (!workingMemoryTemplate) {
       return null;
@@ -1720,6 +1785,7 @@ ${workingMemory}`;
     threadId: string;
     resourceId?: string;
     memoryConfig?: MemoryConfigInternal;
+    runState?: MemoryRunState;
   }): Promise<{
     /** Fully-formed system message (observations + instructions + working memory), or undefined if none. */
     systemMessage: string | undefined;
@@ -1734,7 +1800,7 @@ ${workingMemory}`;
     /** Formatted context blocks from other threads (resource scope only). */
     otherThreadsContext: string | undefined;
   }> {
-    const { threadId, resourceId, memoryConfig } = opts;
+    const { threadId, resourceId, memoryConfig, runState } = opts;
     const config = this.getMergedThreadConfig(memoryConfig);
     const memoryStore = await this.getMemoryStore();
 
@@ -1749,13 +1815,22 @@ ${workingMemory}`;
 
     const omEngine = await this.omEngine;
     if (omEngine) {
-      omRecord = await omEngine.getRecord(threadId, resourceId);
+      const loadOmRecord = () => omEngine.getRecord(threadId, resourceId);
+      omRecord = runState
+        ? await runState.load(`observational-memory:record:${threadId}:${resourceId ?? ''}`, loadOmRecord)
+        : await loadOmRecord();
       if (omRecord?.activeObservations) {
         hasObservations = true;
 
         // For resource scope, load other threads' unobserved context
         if (omEngine.scope === 'resource' && resourceId) {
-          otherThreadsContext = await omEngine.getOtherThreadsContext(resourceId, threadId);
+          const loadOtherThreadsContext = () => omEngine.getOtherThreadsContext(resourceId, threadId);
+          otherThreadsContext = runState
+            ? await runState.load(
+                `observational-memory:other-threads:${resourceId}:${threadId}:${omRecord.lastObservedAt ?? ''}`,
+                loadOtherThreadsContext,
+              )
+            : await loadOtherThreadsContext();
         }
 
         const obsSystemMessage = await omEngine.buildContextSystemMessage({
@@ -1790,7 +1865,12 @@ ${workingMemory}`;
     }
 
     // 2. Working memory system message
-    const workingMemoryMessage = await this.getSystemMessage({ threadId, resourceId, memoryConfig: config });
+    const workingMemoryMessage = await this.getSystemMessage({
+      threadId,
+      resourceId,
+      memoryConfig: config,
+      runState,
+    });
     if (workingMemoryMessage) {
       systemParts.push(workingMemoryMessage);
     }
@@ -1806,22 +1886,35 @@ ${workingMemory}`;
         ? { dateRange: { start: new Date(new Date(omRecord.lastObservedAt).getTime() + 1) } }
         : undefined;
 
+      const boundary = omRecord.lastObservedAt ? new Date(omRecord.lastObservedAt).toISOString() : '';
       if (omEngine.scope === 'resource' && resourceId) {
-        const result = await memoryStore.listMessagesByResourceId({
-          resourceId,
-          orderBy: { field: 'createdAt', direction: 'ASC' },
-          perPage: false,
-          filter: dateFilter,
-        });
-        messages = result.messages;
+        const loadMessages = async () => {
+          const result = await memoryStore.listMessagesByResourceId({
+            resourceId,
+            orderBy: { field: 'createdAt', direction: 'ASC' },
+            perPage: false,
+            includeTotal: false,
+            filter: dateFilter,
+          });
+          return result.messages;
+        };
+        messages = runState
+          ? await runState.load(`observational-memory:messages:resource:${resourceId}:${boundary}`, loadMessages)
+          : await loadMessages();
       } else {
-        const result = await memoryStore.listMessages({
-          threadId,
-          orderBy: { field: 'createdAt', direction: 'ASC' },
-          perPage: false,
-          filter: dateFilter,
-        });
-        messages = result.messages;
+        const loadMessages = async () => {
+          const result = await memoryStore.listMessages({
+            threadId,
+            orderBy: { field: 'createdAt', direction: 'ASC' },
+            perPage: false,
+            includeTotal: false,
+            filter: dateFilter,
+          });
+          return result.messages;
+        };
+        messages = runState
+          ? await runState.load(`observational-memory:messages:thread:${threadId}:${boundary}`, loadMessages)
+          : await loadMessages();
       }
     } else {
       // No OM: load recent messages
@@ -1834,6 +1927,8 @@ ${workingMemory}`;
           resourceId,
           orderBy: { field: 'createdAt', direction: 'DESC' },
           perPage: typeof lastMessages === 'number' ? lastMessages : undefined,
+          // Only `messages` is consumed here; skip the COUNT(*) work.
+          includeTotal: false,
         });
         messages = result.messages.reverse(); // DESC → chronological order
       }
@@ -1924,33 +2019,9 @@ ${workingMemory}`;
       activateOnProviderChange: omConfig.activateOnProviderChange,
       shareTokenBudget: omConfig.shareTokenBudget,
       model: omConfig.model,
-      curationCadence:
-        omConfig.experimental_subconscious instanceof Subconscious
-          ? omConfig.experimental_subconscious.resolved.curationCadence
-          : undefined,
       mastra: this._mastraInstance,
       onIndexObservations,
       hooks: omConfig.hooks,
-      onReflectionCommitted:
-        omConfig.experimental_subconscious instanceof Subconscious
-          ? (() => {
-              const resolved = omConfig.experimental_subconscious.resolved;
-              const omModel = omConfig.observation?.model ?? omConfig.model;
-              const curate = createCuratorHandler(
-                this,
-                resolved,
-                new Memory({ storage: this.storage, options: { observationalMemory: false } }),
-                { omModel },
-              );
-              const learn = createLearnerHandler(
-                this,
-                resolved,
-                new Memory({ storage: this.storage, options: { observationalMemory: false } }),
-                { omModel },
-              );
-              return composeReflectionAgentHandlers([curate, learn]);
-            })()
-          : undefined,
       observation: omConfig.observation
         ? {
             model: omConfig.observation.model,
@@ -1966,6 +2037,7 @@ ${workingMemory}`;
             instruction: omConfig.observation.instruction,
             threadTitle: omConfig.observation.threadTitle,
             observeAttachments: omConfig.observation.observeAttachments,
+            continuationHints: omConfig.observation.continuationHints,
             extract: omConfig.observation.extract,
           }
         : undefined,
@@ -1978,6 +2050,7 @@ ${workingMemory}`;
             bufferActivation: omConfig.reflection.bufferActivation,
             blockAfter: omConfig.reflection.blockAfter,
             instruction: omConfig.reflection.instruction,
+            continuationHints: omConfig.reflection.continuationHints,
             extract: omConfig.reflection.extract,
           }
         : undefined,
@@ -2291,9 +2364,21 @@ Notes:
     }
 
     const { indexName } = await this.createObservationEmbeddingIndex(embedResult.dimension);
+    // Stable UUIDv8 IDs make retries safe even when a write succeeds but its acknowledgement is lost.
+    // UUID formatting also supports vector stores that reject arbitrary string IDs.
+    const ids = embedResult.chunks.map((_, chunkIndex) => {
+      const hash = createHash('sha256')
+        .update(JSON.stringify([resourceId, threadId, groupId, chunkIndex]))
+        .digest();
+      hash[6] = (hash[6]! & 0x0f) | 0x80;
+      hash[8] = (hash[8]! & 0x3f) | 0x80;
+      const hex = hash.toString('hex', 0, 16);
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    });
 
     await this.vector.upsert({
       indexName,
+      ids,
       vectors: embedResult.embeddings,
       metadata: embedResult.chunks.map(chunk => ({
         group_id: groupId,
@@ -2432,6 +2517,7 @@ Notes:
         resourceId,
         perPage: SUMMARIZE_THREAD_DEFAULTS.pageSize,
         page,
+        includeTotal: false,
       });
       if (batch.length === 0) break;
 
@@ -2581,6 +2667,17 @@ Notes:
       omConfig.experimental_subconscious.resolved.tools
     ) {
       Object.assign(tools, createKnowledgeTools(this));
+      const remind = omConfig.experimental_subconscious.resolved.observation.find(
+        agent => agent.name === 'remind' && 'builtIn' in agent,
+      );
+      if (remind && 'builtIn' in remind) {
+        tools.ask_memory = createAskMemoryTool({
+          memory: this,
+          config: remind,
+          omModel: omConfig.observation?.model ?? omConfig.model,
+          getParentAgent: agentId => this._mastraInstance?.getAgentById(agentId),
+        });
+      }
     }
 
     return tools;
@@ -2903,8 +3000,18 @@ Notes:
     memoryConfig?: MemoryConfigInternal,
   ): Promise<StorageCloneThreadOutput> {
     const memoryStore = await this.getMemoryStore();
-    const result = await memoryStore.cloneThread(args);
     const config = this.getMergedThreadConfig(memoryConfig);
+
+    // The caller may opt out of hydrating message payloads (e.g. forked subagents that
+    // only need the new thread id). Force hydration when semantic recall is active, since
+    // embedding requires the cloned message payloads.
+    const requestedHydrate = args.options?.hydrateMessages ?? true;
+    const effectiveHydrate = requestedHydrate || Boolean(this.vector && this.embedder && config.semanticRecall);
+    const result = await memoryStore.cloneThread(
+      effectiveHydrate === requestedHydrate
+        ? args
+        : { ...args, options: { ...args.options, hydrateMessages: effectiveHydrate } },
+    );
 
     // Fetch source thread once for working memory and OM cloning
     const sourceThread = await this.getThreadById({ threadId: args.sourceThreadId });
@@ -2958,6 +3065,73 @@ Notes:
     }
 
     return result;
+  }
+
+  public async updateThreadResourceId({
+    threadId,
+    resourceId,
+    memoryConfig,
+  }: {
+    threadId: string;
+    resourceId: string;
+    memoryConfig?: MemoryConfigInternal;
+  }): Promise<StorageThreadType> {
+    const memoryStore = await this.getMemoryStore();
+
+    const config = this.getMergedThreadConfig(memoryConfig);
+    const migratesVectors = Boolean(this.vector && this.embedder && config.semanticRecall);
+
+    // Preserve the storage no-op contract when there is no vector migration to worry about:
+    // if the thread already belongs to the target resource there is nothing to move, so return
+    // it untouched. When vector migration IS configured we deliberately do NOT short-circuit on
+    // a same-resource call, because a previous attempt may have committed the storage move but
+    // failed to migrate the vectors — short-circuiting there would make the documented retry a
+    // no-op and leave the vectors stale. Re-running the (idempotent) migration repairs that state.
+    if (!migratesVectors) {
+      const existing = await memoryStore.getThreadById({ threadId });
+      if (existing && existing.resourceId === resourceId) {
+        return existing;
+      }
+    }
+
+    const thread = await memoryStore.updateThreadResourceId({ threadId, resourceId });
+
+    // Migrate semantic-recall message vectors so resource-scoped retrieval keeps
+    // surfacing the thread's messages under the new resourceId. The storage
+    // transfer already updated each message row's resource_id, so re-embedding
+    // the fetched messages rewrites the vector metadata with the new owner.
+    if (migratesVectors) {
+      try {
+        const { messages } = await memoryStore.listMessages({ threadId, perPage: false });
+        const messageIndexes = await this.getMemoryVectorIndexes([this.messageIndexPrefix]);
+        await Promise.all(
+          messageIndexes.map(async indexName => {
+            await this.vector!.deleteVectors({ indexName, filter: { thread_id: threadId } });
+          }),
+        );
+        if (messages.length > 0) {
+          await this.embedClonedMessages(messages, config);
+        }
+      } catch (error) {
+        // The storage transfer already committed, but if vector migration fails the thread's
+        // messages can become unrecallable under resource-scoped semantic recall while the
+        // caller believes the transfer fully succeeded. Surface the failure instead of
+        // swallowing it so the caller can retry the migration rather than silently losing recall.
+        this.logger.error('Failed to migrate semantic-recall vectors during thread transfer', {
+          threadId,
+          resourceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw new Error(
+          `Thread "${threadId}" was transferred to resource "${resourceId}", but migrating its ` +
+            `semantic-recall vectors failed. The thread's messages may not surface under resource-scoped ` +
+            `recall until the vectors are re-indexed. Cause: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+    }
+
+    return thread;
   }
 
   /**

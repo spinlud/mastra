@@ -1,5 +1,6 @@
 import { abortFollowupScenario } from './abort-followup.js';
 import { activeSignalFollowupScenario } from './active-signal-followup.js';
+import { agentsMdAutoloadScenario } from './agents-md-autoload.js';
 import { apiKeyDeleteEnvScenario } from './api-key-delete-env.js';
 import { apiKeyMultiProviderDeleteScenario } from './api-key-multi-provider-delete.js';
 import { apiKeyPromptScenario } from './api-key-prompt.js';
@@ -8,6 +9,7 @@ import { approvalOverlayFocusScenario } from './approval-overlay-focus.js';
 import { askUserAdvancedPromptsScenario } from './ask-user-advanced-prompts.js';
 import { autocompleteWrappingNavigationScenario } from './autocomplete-wrapping-navigation.js';
 import { automatedChatScenario } from './automated-chat.js';
+import { bedrockModelDiscoveryScenario } from './bedrock-model-discovery.js';
 import { branchContextLongNameScenario } from './branch-context-long-name.js';
 import { browserActivePendingStatusScenario } from './browser-active-pending-status.js';
 import { browserModelPickerScenario } from './browser-model-picker.js';
@@ -22,6 +24,7 @@ import { browserWizardExportScenario } from './browser-wizard-export.js';
 import { browserbaseStartupRestoreScenario } from './browserbase-startup-restore.js';
 import { clipboardImagePasteScenario } from './clipboard-image-paste.js';
 import { commitAttributionPromptScenario } from './commit-attribution-prompt.js';
+import { connectCommandScenario } from './connect-command.js';
 import { controllerApiConfigScenario } from './controller-api-config.js';
 import { ctrlfQueuedCustomSlashScenario } from './ctrlf-queued-custom-slash.js';
 import { ctrlfQueuedImageFollowupScenario } from './ctrlf-queued-image-followup.js';
@@ -42,8 +45,11 @@ import { fileAutocompleteScenario } from './file-autocomplete.js';
 import { firstRunOnboardingScenario } from './first-run-onboarding.js';
 import { githubSignalsCommandScenario } from './github-signals-command.js';
 import { githubSignalsIncrementalScenario } from './github-signals-incremental.js';
+import { githubSignalsLegacyUpgradeScenario } from './github-signals-legacy-upgrade.js';
+import { githubSignalsMultiSubscribeScenario } from './github-signals-multi-subscribe.js';
 import { githubSignalsNotificationReloadScenario } from './github-signals-notification-reload.js';
 import { githubSignalsPollingInboxScenario } from './github-signals-polling-inbox.js';
+import { githubSignalsToolMultiSubscribeScenario } from './github-signals-tool-multi-subscribe.js';
 import { githubSignalsUnsubscribeReloadScenario } from './github-signals-unsubscribe-reload.js';
 import { goalApiErrorStopsLoopScenario } from './goal-api-error-stops-loop.js';
 import { goalDurationToolApprovalScenario } from './goal-duration-tool-approval.js';
@@ -69,6 +75,7 @@ import { mcpSelectorReconnectScenario } from './mcp-selector-reconnect.js';
 import { mcpServerConfigScenario } from './mcp-server-config.js';
 import { mcpSkippedValidationScenario } from './mcp-skipped-validation.js';
 import { modalAndShellScenario } from './modal-and-shell.js';
+import { modelSearchScenario } from './model-search.js';
 import { modelSelectionApiKeyPromptScenario } from './model-selection-api-key-prompt.js';
 import { modelSelectionCancelEnvScenario } from './model-selection-cancel-env.js';
 import { modelsPackActivationPersistenceScenario } from './models-pack-activation-persistence.js';
@@ -110,11 +117,13 @@ import {
   pluginsStreamingToolOutputScenario,
 } from './plugins.js';
 import { processShortcutsScenario } from './process-shortcuts.js';
+import { profileCommandScenario } from './profile-command.js';
 import { promptContextInstructionsScenario } from './prompt-context-instructions.js';
 import { promptQueueInterleaveScenario } from './prompt-queue-interleave.js';
 import { providerHistoryCompatScenario } from './provider-history-compat.js';
 import { providerHistoryRejectionRetryScenario } from './provider-history-rejection-retry.js';
 import { pruneCommandScenario } from './prune-command.js';
+import { pruneRenderStateScenario } from './prune-render-state.js';
 import { quietSettingsScenario } from './quiet-settings.js';
 import { quietStreamingPreviewHeightScenario } from './quiet-streaming-preview-height.js';
 import { quietToolHistoryParityScenario } from './quiet-tool-history-parity.js';
@@ -145,10 +154,12 @@ import { storageFallbackHistoryReloadScenario } from './storage-fallback-history
 import { storageSettingsScenario } from './storage-settings.js';
 import { storageStartupPgFallbackScenario } from './storage-startup-pg-fallback.js';
 import { streamErrorRetryScenario } from './stream-error-retry.js';
+import { streamingRenderStabilityScenario } from './streaming-render-stability.js';
 import { streamingToolArgsScenario } from './streaming-tool-args.js';
 import { subagentDelegationScenario } from './subagent-delegation.js';
 import { subagentModelStartupRestoreScenario } from './subagent-model-startup-restore.js';
 import { subagentPlanExecuteToolsScenario } from './subagent-plan-execute-tools.js';
+import { subagentsCommandScenario } from './subagents-command.js';
 import { subconsciousActivityRenderingScenario } from './subconscious-activity-rendering.js';
 import { taskInlineTransitionsScenario } from './task-inline-transitions.js';
 import { taskPatchToolsScenario } from './task-patch-tools.js';
@@ -163,6 +174,7 @@ import type { McE2eScenario, ScenarioName } from './types.js';
 import { updateCommandPromptScenario } from './update-command-prompt.js';
 import { updateStartupPromptScenario } from './update-startup-prompt.js';
 import { visibleCommandsScenario } from './visible-commands.js';
+import { webSearchProviderSettingsScenario } from './web-search-provider-settings.js';
 import { webSearchRenderingScenario } from './web-search-rendering.js';
 import { workIdleStatusScenario } from './work-idle-status.js';
 import { workflowsCommandScenario } from './workflows-command.js';
@@ -180,6 +192,7 @@ export const scenarios: Record<ScenarioName, McE2eScenario> = {
   'abort-followup': abortFollowupScenario,
   'branch-context-long-name': branchContextLongNameScenario,
   'active-signal-followup': activeSignalFollowupScenario,
+  'agents-md-autoload': agentsMdAutoloadScenario,
   'autocomplete-wrapping-navigation': autocompleteWrappingNavigationScenario,
   'api-key-delete-env': apiKeyDeleteEnvScenario,
   'api-key-multi-provider-delete': apiKeyMultiProviderDeleteScenario,
@@ -200,6 +213,7 @@ export const scenarios: Record<ScenarioName, McE2eScenario> = {
   'browser-wizard-browserbase': browserWizardBrowserbaseScenario,
   'browser-wizard-export': browserWizardExportScenario,
   'clipboard-image-paste': clipboardImagePasteScenario,
+  'connect-command': connectCommandScenario,
   'commit-attribution-prompt': commitAttributionPromptScenario,
   'custom-config-dir': customConfigDirScenario,
   'custom-pack-import-overwrite': customPackImportOverwriteScenario,
@@ -219,6 +233,9 @@ export const scenarios: Record<ScenarioName, McE2eScenario> = {
   'file-autocomplete': fileAutocompleteScenario,
   'first-run-onboarding': firstRunOnboardingScenario,
   'github-signals-command': githubSignalsCommandScenario,
+  'github-signals-multi-subscribe': githubSignalsMultiSubscribeScenario,
+  'github-signals-legacy-upgrade': githubSignalsLegacyUpgradeScenario,
+  'github-signals-tool-multi-subscribe': githubSignalsToolMultiSubscribeScenario,
   'github-signals-incremental': githubSignalsIncrementalScenario,
   'github-signals-notification-reload': githubSignalsNotificationReloadScenario,
   'github-signals-polling-inbox': githubSignalsPollingInboxScenario,
@@ -248,6 +265,8 @@ export const scenarios: Record<ScenarioName, McE2eScenario> = {
   'mcp-selector-reconnect': mcpSelectorReconnectScenario,
   'mcp-server-config': mcpServerConfigScenario,
   'mcp-skipped-validation': mcpSkippedValidationScenario,
+  'bedrock-model-discovery': bedrockModelDiscoveryScenario,
+  'model-search': modelSearchScenario,
   'model-selection-api-key-prompt': modelSelectionApiKeyPromptScenario,
   'model-selection-cancel-env': modelSelectionCancelEnvScenario,
   'models-pack-activation-persistence': modelsPackActivationPersistenceScenario,
@@ -292,8 +311,11 @@ export const scenarios: Record<ScenarioName, McE2eScenario> = {
   'provider-history-rejection-retry': providerHistoryRejectionRetryScenario,
   'prompt-context-instructions': promptContextInstructionsScenario,
   'prompt-queue-interleave': promptQueueInterleaveScenario,
+  'profile-command': profileCommandScenario,
   'prune-command': pruneCommandScenario,
+  'prune-render-state': pruneRenderStateScenario,
   'quiet-settings': quietSettingsScenario,
+  'web-search-provider-settings': webSearchProviderSettingsScenario,
   'quiet-streaming-preview-height': quietStreamingPreviewHeightScenario,
   'quiet-tool-history-parity': quietToolHistoryParityScenario,
   'report-issue-command': reportIssueCommandScenario,
@@ -321,7 +343,9 @@ export const scenarios: Record<ScenarioName, McE2eScenario> = {
   'storage-settings': storageSettingsScenario,
   'storage-startup-pg-fallback': storageStartupPgFallbackScenario,
   'stream-error-retry': streamErrorRetryScenario,
+  'streaming-render-stability': streamingRenderStabilityScenario,
   'streaming-tool-args': streamingToolArgsScenario,
+  'subagents-command': subagentsCommandScenario,
   'subagent-delegation': subagentDelegationScenario,
   'subagent-plan-execute-tools': subagentPlanExecuteToolsScenario,
   'subagent-model-startup-restore': subagentModelStartupRestoreScenario,

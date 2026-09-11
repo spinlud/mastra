@@ -2,6 +2,7 @@ import { ContextMenu as ContextMenuPrimitive } from '@base-ui/react/context-menu
 import type { ContextMenuPopupProps, ContextMenuPositionerProps } from '@base-ui/react/context-menu';
 import { CheckIcon, ChevronDown, Circle } from 'lucide-react';
 import * as React from 'react';
+import { FLOATING_POSITION_METHOD } from '@/ds/primitives/floating';
 import { cn } from '@/lib/utils';
 
 const ContextMenuRoot = ContextMenuPrimitive.Root;
@@ -40,7 +41,7 @@ const ContextMenuContent = React.forwardRef<HTMLDivElement, ContextMenuContentPr
       sideOffset = 0,
       container,
       anchor,
-      positionMethod,
+      positionMethod = FLOATING_POSITION_METHOD,
       collisionBoundary,
       collisionPadding,
       sticky,
@@ -176,7 +177,7 @@ const ContextMenuSeparator = React.forwardRef<HTMLDivElement, ContextMenuPrimiti
 ContextMenuSeparator.displayName = 'ContextMenuSeparator';
 
 const ContextMenuShortcut = ({ className, ...props }: React.HTMLAttributes<HTMLSpanElement>) => {
-  return <span className={cn('ml-auto text-xs tracking-widest opacity-60', className)} {...props} />;
+  return <span className={cn('ml-auto text-ui-sm tracking-widest opacity-60', className)} {...props} />;
 };
 ContextMenuShortcut.displayName = 'ContextMenuShortcut';
 
@@ -214,7 +215,7 @@ const ContextMenuSubContent = React.forwardRef<HTMLDivElement, ContextMenuSubCon
       side = 'right',
       sideOffset = -4,
       anchor,
-      positionMethod,
+      positionMethod = FLOATING_POSITION_METHOD,
       collisionBoundary,
       collisionPadding,
       sticky,

@@ -154,6 +154,7 @@ export function ScorerMiniEditor({
         }
       })
       .finally(() => setIsLoadingScorer(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only reload when the edited scorer changes
   }, [editScorerId]);
 
   const { provider, model } = usePlaygroundModel();
@@ -383,7 +384,7 @@ export function ScorerMiniEditor({
           {isEditing || savedScorerId ? 'Edit Scorer' : 'New Scorer'}
         </Txt>
         {(isEditing || savedScorerId) && (
-          <Badge variant="success" className="ml-2">
+          <Badge variant="green" className="ml-2">
             Saved
           </Badge>
         )}
@@ -520,10 +521,10 @@ export function ScorerMiniEditor({
                         <Txt variant="ui-sm" className="font-medium">
                           Item {index + 1}
                         </Txt>
-                        {item.label && <Badge variant="default">{item.label}</Badge>}
+                        {item.label && <Badge>{item.label}</Badge>}
                         <button
                           className={cn(
-                            'px-2 py-0.5 rounded text-xs font-medium transition-colors',
+                            'px-2 py-0.5 rounded text-ui-sm font-medium transition-colors',
                             item.expectedDirection === 'high' ? 'bg-success/20 text-success' : 'bg-error/20 text-error',
                           )}
                           onClick={() =>
@@ -561,7 +562,7 @@ export function ScorerMiniEditor({
                           value={typeof item.input === 'string' ? item.input : JSON.stringify(item.input, null, 2)}
                           onChange={e => updateTestItem(index, 'input', e.target.value)}
                           rows={3}
-                          className="text-sm"
+                          className="text-ui-md"
                         />
                       </div>
                       <div className="space-y-1">
@@ -573,7 +574,7 @@ export function ScorerMiniEditor({
                           value={typeof item.output === 'string' ? item.output : JSON.stringify(item.output, null, 2)}
                           onChange={e => updateTestItem(index, 'output', e.target.value)}
                           rows={3}
-                          className="text-sm"
+                          className="text-ui-md"
                         />
                       </div>
                     </div>
@@ -618,7 +619,7 @@ export function ScorerMiniEditor({
                     let correct = 0;
                     let incorrect = 0;
                     let errors = 0;
-                    experimentResults.forEach((result: { output: unknown; error: string | null }, i: number) => {
+                    experimentResults.forEach((result, i: number) => {
                       const item = testItems[i];
                       if (!item) return;
                       if (result.error) {
@@ -634,9 +635,9 @@ export function ScorerMiniEditor({
                     });
                     return (
                       <>
-                        {correct > 0 && <Badge variant="success">{correct} correct</Badge>}
-                        {incorrect > 0 && <Badge variant="error">{incorrect} incorrect</Badge>}
-                        {errors > 0 && <Badge variant="default">{errors} errors</Badge>}
+                        {correct > 0 && <Badge variant="green">{correct} correct</Badge>}
+                        {incorrect > 0 && <Badge variant="red">{incorrect} incorrect</Badge>}
+                        {errors > 0 && <Badge>{errors} errors</Badge>}
                       </>
                     );
                   })()}

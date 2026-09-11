@@ -1,5 +1,6 @@
+import { Badge } from '@mastra/playground-ui/components/Badge';
+import type { BadgeVariant } from '@mastra/playground-ui/components/Badge';
 import { Button } from '@mastra/playground-ui/components/Button';
-import { Chip } from '@mastra/playground-ui/components/Chip';
 import { Combobox } from '@mastra/playground-ui/components/Combobox';
 import { CopyButton } from '@mastra/playground-ui/components/CopyButton';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody } from '@mastra/playground-ui/components/Dialog';
@@ -58,14 +59,23 @@ function getExpectedTrajectoryLabel(expectedTrajectory: unknown): string {
   return steps > 0 ? `${steps} expected steps` : 'trajectory';
 }
 
-// Deterministic tag color from string
-const TAG_COLORS = ['blue', 'green', 'purple', 'orange', 'cyan', 'pink', 'red', 'yellow'] as const;
-function getTagColor(tag: string): (typeof TAG_COLORS)[number] {
+const TAG_BADGE_VARIANTS = [
+  'blue',
+  'green',
+  'purple',
+  'orange',
+  'cyan',
+  'pink',
+  'red',
+  'yellow',
+] as const satisfies readonly BadgeVariant[];
+
+function getTagBadgeVariant(tag: string): (typeof TAG_BADGE_VARIANTS)[number] {
   let hash = 0;
   for (let i = 0; i < tag.length; i++) {
     hash = ((hash << 5) - hash + tag.charCodeAt(i)) | 0;
   }
-  return TAG_COLORS[Math.abs(hash) % TAG_COLORS.length];
+  return TAG_BADGE_VARIANTS[Math.abs(hash) % TAG_BADGE_VARIANTS.length];
 }
 
 export function DatasetDetailView({
@@ -231,9 +241,9 @@ export function DatasetDetailView({
             {datasetTags.length > 0 && (
               <div className="mt-1.5 flex flex-wrap gap-1">
                 {datasetTags.map(tag => (
-                  <Chip key={tag} color={getTagColor(tag)} size="small">
+                  <Badge key={tag} variant={getTagBadgeVariant(tag)} size="xs">
                     {tag}
-                  </Chip>
+                  </Badge>
                 ))}
               </div>
             )}
@@ -430,9 +440,9 @@ export function DatasetDetailView({
                               {truncateValue(item.input)}
                             </Txt>
                             {item.expectedTrajectory != null && (
-                              <Chip size="small" color="purple">
+                              <Badge size="xs" variant="purple">
                                 {getExpectedTrajectoryLabel(item.expectedTrajectory)}
-                              </Chip>
+                              </Badge>
                             )}
                           </div>
                         </button>
@@ -489,7 +499,8 @@ export function DatasetDetailView({
                           {exp.startedAt ? formatTimestamp(exp.startedAt) : 'Unknown'}
                         </Txt>
                         <Txt variant="ui-xs" className="text-neutral3">
-                          {exp.succeededCount}/{exp.totalItems} passed
+                          {exp.totalItems} items
+                          {exp.failedCount > 0 && ` · ${exp.failedCount} errored`}
                           {exp.datasetVersion != null && ` · ${formatVersionLabel('Dataset', exp.datasetVersion)}`}
                           {exp.agentVersion &&
                             (() => {
@@ -533,7 +544,7 @@ export function DatasetDetailView({
                   placeholder="Search scorers..."
                   value={attachScorerSearch}
                   onChange={e => setAttachScorerSearch(e.target.value)}
-                  className="border-border1 bg-surface2 text-text1 placeholder:text-neutral3 focus:ring-accent1 w-full rounded border px-3 py-1.5 text-sm focus:ring-1 focus:outline-none"
+                  className="border-border1 bg-surface2 text-text1 placeholder:text-neutral3 focus:ring-accent1 text-ui-md w-full rounded border px-3 py-1.5 focus:ring-1 focus:outline-none"
                 />
                 {unattachedScorerEntries
                   .filter(([id, scorer]) => {
@@ -664,7 +675,7 @@ function ExpandedItemEditor({
           <Textarea
             value={inputValue}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setInputValue(e.target.value)}
-            className="mt-1 font-mono text-xs"
+            className="text-ui-sm mt-1 font-mono"
             rows={4}
           />
         </div>
@@ -675,7 +686,7 @@ function ExpandedItemEditor({
           <Textarea
             value={groundTruthValue}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setGroundTruthValue(e.target.value)}
-            className="mt-1 font-mono text-xs"
+            className="text-ui-sm mt-1 font-mono"
             rows={3}
             placeholder="Optional"
           />
@@ -687,7 +698,7 @@ function ExpandedItemEditor({
           <Textarea
             value={trajectoryValue}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setTrajectoryValue(e.target.value)}
-            className="mt-1 font-mono text-xs"
+            className="text-ui-sm mt-1 font-mono"
             rows={3}
             placeholder="Optional — JSON trajectory expectation"
           />
@@ -720,7 +731,7 @@ function ExpandedItemEditor({
         <Txt variant="ui-xs" className="text-neutral3 font-medium">
           Input
         </Txt>
-        <pre className="text-neutral5 bg-surface1 mt-1 max-h-48 overflow-x-auto overflow-y-auto rounded px-2 py-1.5 text-xs wrap-break-word whitespace-pre-wrap">
+        <pre className="text-neutral5 bg-surface1 text-ui-sm mt-1 max-h-48 overflow-x-auto overflow-y-auto rounded px-2 py-1.5 wrap-break-word whitespace-pre-wrap">
           {formatValue(item.input)}
         </pre>
       </div>
@@ -729,7 +740,7 @@ function ExpandedItemEditor({
           <Txt variant="ui-xs" className="text-neutral3 font-medium">
             Ground Truth
           </Txt>
-          <pre className="text-neutral5 bg-surface1 mt-1 max-h-48 overflow-x-auto overflow-y-auto rounded px-2 py-1.5 text-xs wrap-break-word whitespace-pre-wrap">
+          <pre className="text-neutral5 bg-surface1 text-ui-sm mt-1 max-h-48 overflow-x-auto overflow-y-auto rounded px-2 py-1.5 wrap-break-word whitespace-pre-wrap">
             {formatValue(item.groundTruth)}
           </pre>
         </div>
@@ -739,7 +750,7 @@ function ExpandedItemEditor({
           <Txt variant="ui-xs" className="text-neutral3 font-medium">
             Expected Trajectory
           </Txt>
-          <pre className="text-neutral5 bg-surface1 mt-1 max-h-48 overflow-x-auto overflow-y-auto rounded px-2 py-1.5 text-xs break-words whitespace-pre-wrap">
+          <pre className="text-neutral5 bg-surface1 text-ui-sm mt-1 max-h-48 overflow-x-auto overflow-y-auto rounded px-2 py-1.5 break-words whitespace-pre-wrap">
             {formatValue(item.expectedTrajectory)}
           </pre>
         </div>

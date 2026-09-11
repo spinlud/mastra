@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto';
 
 import { Agent } from '../agent';
+import { MessageList } from '../agent/message-list';
 import type { MastraDBMessage, MastraMessageContentV2 } from '../agent/message-list/state/types';
+import { isUserAuthoredMessage } from '../agent/signals';
 import type { ActiveThreadRun } from '../agent/thread-stream-runtime';
 import type { AgentInstructions, ToolsInput, ToolsetsInput } from '../agent/types';
 import type { MastraBrowser } from '../browser/browser';
 import { AgentControllerChannels } from '../channels/agent-controller-channels';
-import { getErrorFromUnknown } from '../error';
 import { GatewayManager } from '../llm/model/gateways';
 import { defaultGateways } from '../llm/model/gateways/defaults';
+import type { MastraModelConfig } from '../llm/model/shared.types';
 import { Mastra } from '../mastra';
 import type { MastraMemory } from '../memory/memory';
 import type { StorageThreadType } from '../memory/types';
@@ -16,10 +18,9 @@ import type { TracingContext, TracingOptions } from '../observability';
 import { RequestContext } from '../request-context';
 import type { MastraCompositeStore } from '../storage/base';
 import type { MemoryStorage } from '../storage/domains/memory/base';
-import type { ObservationalMemoryRecord } from '../storage/types';
+import type { ObservationalMemoryRecord, StorageListMessagesInput, StorageListMessagesOutput } from '../storage/types';
 import type { DynamicArgument } from '../types';
 import { Workspace } from '../workspace/workspace';
-import type { WorkspaceConfig } from '../workspace/workspace';
 
 import { Session } from './session';
 import type { ThreadDataStore } from './session';
@@ -148,6 +149,10 @@ export function buildFableFallbackProviderOptions(
  * Without a notice the user has no way to tell that the response did not come
  * from the model they selected.
  */
+
+/** How much of the tail a rename reads: enough to say where the thread went, bounded so a long thread costs no more than a short one. */
+const TITLE_WINDOW_MESSAGES = 20;
+
 /**
  * The AgentController orchestrates multiple agent modes, shared state, memory, and storage.
  * It's the core abstraction that a TUI (or other UI) controls.
@@ -167,7 +172,7 @@ export function buildFableFallbackProviderOptions(
  * })
  *
  * controller.subscribe((event) => {
- *   if (event.type === "message_update") renderMessage(event.message)
+ *   if (event.type === "message_update") appendText(event.id, event.event.delta)
  * })
  *
  * await controller.init()
@@ -178,7 +183,6 @@ export class AgentController<TState = {}> {
   readonly id: string;
 
   private config: AgentControllerConfig<TState>;
-  private workspaceInitialized = false;
   private initPromise: Promise<void> | undefined = undefined;
   private browser: DynamicArgument<MastraBrowser | undefined> = undefined;
   private workspace: DynamicArgument<Workspace | undefined> = undefined;
@@ -403,8 +407,9 @@ export class AgentController<TState = {}> {
     session.thread.connect(this.createThreadDataStore(session), session as Session);
     session.setMachinery({
       getAgent: () => this.getCurrentAgent(session),
-      subscribeToThread: ({ resourceId, threadId }) =>
-        this.getCurrentAgent(session).subscribeToThread({ resourceId, threadId }),
+      getRunScope: runId => this.getMastra()?.__getRunScope(runId),
+      subscribeToThread: ({ agent, resourceId, threadId }) =>
+        (agent ?? this.getCurrentAgent(session)).subscribeToThread({ resourceId, threadId }),
       buildStreamOptions: input => this.buildAgentMessageStreamOptions({ session, ...input }),
       buildSharedRunOptions: () => this.buildSharedRunOptions(session),
       buildToolsets: requestContext => this.buildToolsets(session, requestContext),
@@ -685,22 +690,6 @@ export class AgentController<TState = {}> {
       }),
     );
 
-    if (workspaceToConnect && workspaceToConnect instanceof Workspace) {
-      try {
-        await workspaceToConnect.init();
-        session.emit({ type: 'workspace_status_changed', status: 'ready' });
-        session.emit({
-          type: 'workspace_ready',
-          workspaceId: workspaceToConnect.id,
-          workspaceName: workspaceToConnect.name,
-        });
-      } catch (error) {
-        const initError = getErrorFromUnknown(error);
-        session.emit({ type: 'workspace_status_changed', status: 'error', error: initError });
-        session.emit({ type: 'workspace_error', error: initError });
-      }
-    }
-
     if (overrides?.threadId) {
       const existingThread = await session.thread.getById({ threadId: overrides.threadId });
       if (existingThread) {
@@ -830,14 +819,12 @@ export class AgentController<TState = {}> {
   }
 
   /**
-   * Whether the AgentController-level static workspace has been initialized. Dynamic
-   * factory workspaces are resolved and initialized per-session during
-   * `createSession`, so this returns `false` for factory configs until a
-   * session is created.
+   * Whether the AgentController-level static workspace has been explicitly initialized.
+   * Dynamic factory workspaces have no controller-level readiness state.
    */
   isWorkspaceReady(): boolean {
     if (typeof this.workspace === 'function') return true;
-    return this.workspaceInitialized && this.workspace !== undefined;
+    return this.workspace?.status === 'ready';
   }
 
   /**
@@ -918,8 +905,8 @@ export class AgentController<TState = {}> {
   // ===========================================================================
 
   /**
-   * Initialize the harness — loads storage and workspace.
-   * Must be called before using the harness. Idempotent: repeated calls
+   * Initialize the harness by loading storage and propagating runtime services.
+   * Workspaces initialize lazily when used. Must be called before using the harness. Idempotent: repeated calls
    * return the same in-flight/completed initialization instead of rebuilding
    * the internal Mastra instance (which would orphan registered agents).
    */
@@ -944,14 +931,14 @@ export class AgentController<TState = {}> {
   #storageInitPromise?: Promise<void>;
 
   private async runStorageInit(): Promise<void> {
-    // Create an internal Mastra instance so agents have access to storage
-    // (required for tool approval snapshot persistence/resume).
+    // Create an internal Mastra instance so mode agents share the run state
+    // needed to persist and resume tool approvals, even without configured storage.
     // We init storage through Mastra's proxied storage so augmentWithInit
     // tracks it and won't double-init.
     //
     // Skip this when registered on a parent Mastra: that Mastra already owns
     // storage/agents/gateways, and getMastra() resolves to it.
-    if (this.config.storage && !this.#externalMastra) {
+    if (!this.#externalMastra) {
       const enabledGateways = this.config.gateways?.filter(gateway => gateway.shouldEnable?.() ?? true);
       const gateways = enabledGateways?.length
         ? Object.fromEntries(enabledGateways.map(gateway => [gateway.id, gateway]))
@@ -959,7 +946,7 @@ export class AgentController<TState = {}> {
 
       this.#internalMastra = new Mastra({
         logger: false,
-        storage: this.config.storage,
+        ...(this.config.storage ? { storage: this.config.storage } : {}),
         ...(this.config.pubsub ? { pubsub: this.config.pubsub } : {}),
         ...(this.config.observability ? { observability: this.config.observability } : {}),
         ...(gateways ? { gateways } : {}),
@@ -975,30 +962,10 @@ export class AgentController<TState = {}> {
   }
 
   private async runInit(): Promise<void> {
-    // Storage init is a prerequisite for both reads and writes; share the same
-    // promise so a concurrent read that already triggered storage init doesn't
-    // race with the workspace init we're about to do.
     await this.initStorage();
 
-    // Initialize workspace if configured (skip for dynamic factory — resolved per-request)
-    if (this.config.workspace && !this.workspaceInitialized && typeof this.workspace !== 'function') {
-      try {
-        if (!this.workspace) {
-          this.workspace = new Workspace(this.config.workspace as WorkspaceConfig);
-        }
-
-        await (this.workspace as Workspace).init();
-        this.workspaceInitialized = true;
-      } catch {
-        this.workspace = undefined;
-        this.workspaceInitialized = false;
-        // Sessions created later will call workspace.init() themselves and
-        // surface the error through workspace_error events on the session.
-      }
-    }
-
     // Propagate harness-level Mastra, memory, workspace, browser, and pubsub
-    // to the agent(s) that back each mode (after workspace init).
+    // to the agent(s) that back each mode. Workspaces initialize lazily when used.
     for (const agent of this.backingAgents()) {
       this.propagateRuntimeServicesToAgent(agent);
     }
@@ -1029,7 +996,23 @@ export class AgentController<TState = {}> {
       listThreads: ({ resourceId, includeForkedSubagents, metadata }) =>
         this.queryThreads({ resourceId, includeForkedSubagents, metadata }),
       getById: ({ threadId }) => this.queryThreadById({ threadId }),
-      listMessages: ({ threadId, limit }) => this.queryThreadMessages({ threadId, limit }),
+      listMessages: async ({ threadId, limit }) => {
+        if (limit !== undefined) {
+          const result = await this.queryThreadMessages({
+            threadId,
+            perPage: limit,
+            page: 0,
+            orderBy: { field: 'createdAt', direction: 'DESC' },
+          });
+          return { ...result, messages: result.messages.reverse() };
+        }
+
+        return this.queryThreadMessages({
+          threadId,
+          perPage: false,
+          orderBy: { field: 'createdAt', direction: 'ASC' },
+        });
+      },
       firstUserMessages: ({ threadIds }) => this.queryFirstUserMessages({ threadIds }),
       getMetadata: ({ threadId, key }) => this.readThreadMetadataValue({ threadId, key }),
       setMetadata: ({ threadId, key, value }) => this.writeThreadMetadataValue({ threadId, key, value }),
@@ -1234,28 +1217,43 @@ export class AgentController<TState = {}> {
 
   /**
    * List messages for a thread directly from storage, without constructing a
-   * {@link Session}. Read-only server endpoints use this so a GET on a thread's
-   * messages doesn't spin up a workspace/sandbox as a side effect of session
-   * creation.
+   * {@link Session}. The session thread-data adapter and read-only server
+   * endpoints use this shared path so message reads never provision a
+   * workspace/sandbox.
    */
-  async queryThreadMessages({ threadId, limit }: { threadId: string; limit?: number }): Promise<MastraDBMessage[]> {
+  async queryThreadMessages({
+    threadId,
+    resourceId,
+    perPage,
+    page,
+    orderBy = { field: 'createdAt', direction: 'DESC' },
+    include,
+    filter,
+  }: Omit<StorageListMessagesInput, 'threadId'> & { threadId: string }): Promise<StorageListMessagesOutput> {
     await this.initStorage();
-    if (!this.#resolveStorage()) return [];
-
-    const memoryStorage = await this.getMemoryStorage();
-
-    if (limit) {
-      const result = await memoryStorage.listMessages({
-        threadId,
-        perPage: limit,
-        page: 0,
-        orderBy: { field: 'createdAt', direction: 'DESC' },
-      });
-      return result.messages.map(msg => this.convertToControllerMessage(msg)).reverse();
+    if (!this.#resolveStorage()) {
+      return {
+        messages: [],
+        total: 0,
+        page: page ?? 0,
+        perPage: perPage ?? 40,
+        hasMore: false,
+      };
     }
 
-    const result = await memoryStorage.listMessages({ threadId, perPage: false });
-    return result.messages.map(msg => this.convertToControllerMessage(msg));
+    const result = await (
+      await this.getMemoryStorage()
+    ).listMessages({
+      threadId,
+      ...(resourceId !== undefined ? { resourceId } : {}),
+      ...(perPage !== undefined ? { perPage } : {}),
+      ...(page !== undefined ? { page } : {}),
+      ...(orderBy !== undefined ? { orderBy } : {}),
+      ...(include !== undefined ? { include } : {}),
+      ...(filter !== undefined ? { filter } : {}),
+    });
+
+    return { ...result, messages: result.messages.map(msg => this.convertToControllerMessage(msg)) };
   }
 
   private async queryFirstUserMessages({ threadIds }: { threadIds: string[] }): Promise<Map<string, MastraDBMessage>> {
@@ -1270,7 +1268,7 @@ export class AgentController<TState = {}> {
 
     const firstUserMessages = new Map<string, MastraDBMessage>();
     for (const message of result.messages) {
-      if (message.role !== 'user' || !message.threadId || firstUserMessages.has(message.threadId)) continue;
+      if (!isUserAuthoredMessage(message) || !message.threadId || firstUserMessages.has(message.threadId)) continue;
       firstUserMessages.set(message.threadId, this.convertToControllerMessage(message));
 
       if (firstUserMessages.size === threadIds.length) {
@@ -1279,6 +1277,74 @@ export class AgentController<TState = {}> {
     }
 
     return firstUserMessages;
+  }
+
+  /**
+   * Name a thread from where its conversation went, with the model and
+   * instructions `generateTitle` gives the first-turn namer — so a title asked
+   * for by hand reads like one the thread would have been given on its own.
+   *
+   * Runs without constructing a {@link Session}: naming reads a window of recent
+   * messages and writes the thread row, so asking for a title never spins up a
+   * workspace or sandbox. A session already live for the resource lends its agent, request
+   * context and event stream; otherwise the default mode answers — and with no
+   * session state to read, a `generateTitle.model` that resolves from it falls
+   * back to its own default, which is why hosts that store the choice elsewhere
+   * pass `model`. Resolves to the new title, or `undefined` when the model
+   * returns nothing and the current title stands.
+   */
+  async generateThreadTitle({
+    threadId,
+    resourceId,
+    scope,
+    model,
+    requestContext: callerContext,
+  }: {
+    threadId: string;
+    resourceId?: string;
+    scope?: string;
+    /** Overrides the memory-configured title model — for hosts that resolve it themselves. */
+    model?: DynamicArgument<MastraModelConfig>;
+    /** The caller's context — carries the identity model resolution bills to. */
+    requestContext?: RequestContext;
+  }): Promise<string | undefined> {
+    const thread = await this.queryThreadById({ threadId });
+    if (!thread) throw new Error(`Thread not found: ${threadId}`);
+
+    const recent = await this.queryThreadMessages({
+      threadId,
+      perPage: TITLE_WINDOW_MESSAGES,
+      page: 0,
+      orderBy: { field: 'createdAt', direction: 'DESC' },
+    });
+    const messages = new MessageList().add(recent.messages.reverse(), 'memory').get.all.ui();
+    if (!messages.some(message => message.role === 'user')) {
+      throw new Error('This conversation has no message to name it from yet.');
+    }
+
+    const session = resourceId ? await this.getSessionByResource(resourceId, scope) : undefined;
+    const agent = session
+      ? this.getCurrentAgent(session)
+      : this.propagateRuntimeServicesToAgent(this.getAgentForMode(this.#defaultMode));
+    const requestContext = session
+      ? await this.buildRequestContext(session, callerContext)
+      : (callerContext ?? new RequestContext());
+    const configured = (await agent.getMemory({ requestContext }))?.getMergedThreadConfig().generateTitle;
+    const titleConfig = typeof configured === 'object' ? configured : undefined;
+
+    const title = (
+      await agent.generateTitleFromUserMessage({
+        messages,
+        requestContext,
+        model: model ?? titleConfig?.model,
+        instructions: titleConfig?.instructions,
+      })
+    )?.trim();
+    if (!title) return undefined;
+
+    await this.persistThreadRow({ ...thread, title, updatedAt: new Date() });
+    session?.emit({ type: 'thread_title_updated', threadId, title });
+    return title;
   }
 
   // ===========================================================================
@@ -1859,11 +1925,18 @@ export class AgentController<TState = {}> {
     tracingContext?: TracingContext;
     tracingOptions?: TracingOptions;
   }): Promise<Record<string, unknown>> {
-    if (!session.thread.getId()) {
+    const runThreadId = session.thread.getId();
+    if (!runThreadId) {
       throw new Error('Cannot build stream options without a current thread');
     }
 
     session.run.clearAbortRequested();
+    // Reconcile the in-memory model selection with the persisted per-mode model
+    // before snapshotting it into the request context. In multiplayer
+    // deployments another process (or a freshly-created Session for an existing
+    // thread) may have persisted a different model; the per-instance cache would
+    // otherwise run with a stale selection. No-op in the single-player TUI.
+    await session.model.syncFromPersisted({ modeId: session.mode.get() });
     const requestContext = await this.buildRequestContext(session, requestContextInput);
     // Resolve mode-aware instructions at call time so the agent's own
     // instructions are never mutated by the harness.
@@ -1886,7 +1959,14 @@ export class AgentController<TState = {}> {
 
     const streamOptions: Record<string, unknown> = {
       ...this.buildSharedRunOptions(session),
-      memory: { thread: session.thread.getId(), resource: session.identity.getResourceId() },
+      memory: {
+        thread: runThreadId,
+        resource: session.identity.getResourceId(),
+        // Titling outlives the run, so the thread it named is the one captured here,
+        // not whichever thread the session happens to hold when the model answers.
+        onTitleGenerated: (title: string) =>
+          session.emit({ type: 'thread_title_updated', threadId: runThreadId, title }),
+      },
       abortSignal: session.run.ensureAbortController().signal,
       requestContext,
       outputWriter: async (chunk: { type?: string; data?: unknown }) => {
@@ -2131,6 +2211,10 @@ export class AgentController<TState = {}> {
                   forkedSubagent: true,
                   parentThreadId: sourceThreadId,
                 },
+                // The fork only needs the new thread id; skip hydrating message payloads
+                // into the Node heap. Memory.cloneThread re-enables hydration when semantic
+                // recall is active so embeddings still work.
+                options: { hydrateMessages: false },
               });
               return { id: result.thread.id, resourceId: result.thread.resourceId };
             }
